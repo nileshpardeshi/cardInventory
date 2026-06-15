@@ -4,8 +4,8 @@
 | | |
 |---|---|
 | **Document** | Card Inventory Management (CIM) — Consolidated Requirements |
-| **Version** | 2.0 (consolidated) |
-| **Date** | June 2026 |
+| **Version** | 2.1 (consolidated) |
+| **Date** | 15 June 2026 |
 | **Classification** | Confidential — Internal |
 | **Module placement** | Bounded context within the **Issuance Service** of the CMS |
 | **Card programs covered** | Debit, Prepaid, Pre-generated (pregen/insta) and Personalised |
@@ -34,7 +34,12 @@
 17. UX Reference (screen-by-screen)
 18. Implementation Roadmap
 19. Acceptance Criteria & KPIs
-20. Glossary
+20. Resilience, Offline & Edge-Case Handling
+21. Assumptions, Constraints & Dependencies
+22. Risks & Mitigations
+23. Open Questions & Decisions Log
+24. Glossary
+25. Revision History
 
 ---
 
@@ -275,12 +280,45 @@ Priority: **M** = must (Phase 1), **S** = should, **C** = could.
 - **M** Each exception is a trackable case (open → investigating → resolved/closed) with owner, SLA timer, resolution code.
 - **M** Lost/stolen stock auto-calls Issuance API to block/hotlist the affected card numbers/kits.
 
+**Exception severity, SLA & escalation matrix** (institution-configurable; SLA clock starts at case creation):
+
+| Exception | Severity | Resolution SLA | Escalation path |
+|---|---|---|---|
+| Stock-out | Critical | 4 business hours | Branch → Region (1h) → Centre (2h) |
+| Operator/custodian day-close variance | Critical | Same day (blocks close) | Branch Manager → Region |
+| Lost / stolen | Critical | 1h to hotlist; 24h to write-off | Branch → Risk → Centre (immediate) |
+| Below safety | High | 1 business day | Branch → Region (1d) |
+| In-transit overdue | High | 1 business day | Branch → Region → Carrier |
+| GRN pending beyond SLA | High | 2 business days | Branch → Region |
+| Duplicate / mismatched serial | High | 2 business days | Branch → Centre |
+| Near-expiry (≤ 30d) | Medium | 5 business days | Branch → Region |
+| Overstock / dormant stock | Medium | 5 business days | Branch → Region |
+| Unacknowledged dispatch | Medium | 2 business days | Sender → Region |
+| PO overdue | Medium | 3 business days | Central Ops → Vendor |
+| Unclaimed personalised card | Medium | At retention horizon | Branch → Region |
+
+- **M** Unresolved cases auto-escalate up the hierarchy at each tier's SLA breach; breach counts and resolution times feed branch/vendor quality metrics.
+
 ### 8.11 Dashboards & reporting
 - **M** Executive dashboard, role-scoped operational dashboards, and a full standard report set (see §16).
 
 ### 8.12 Destruction & disposal
 - **M** Destruction Request (serials/ranges + reason) with maker-checker; physical destruction recorded with method, two witnesses, and uploaded certificate → `DESTROYED`.
 - **M** On approval, Issuance API permanently blocks/closes the corresponding card records. Registers retained per policy (default 10 years), immutable.
+
+### 8.13 Notifications & alerts
+- **M** Every alert rule maps to **recipients** (by role / hierarchy node) and one or more **channels**; channel and threshold are configuration, not code.
+- **M** Delivery is **idempotent and de-duplicated** (one event ≠ repeated pings), with digest options to avoid alert fatigue; every alert also lands in the in-app exception inbox.
+
+| Event class | Default channel(s) | Default recipients |
+|---|---|---|
+| Critical (stock-out, lost/stolen, day-close blocked) | In-app + SMS + email + push | Branch Manager, Custodian, Region; Risk for lost/stolen |
+| High (below safety, in-transit overdue, GRN overdue) | In-app + email | Branch, Region |
+| Medium (near-expiry, overstock, PO overdue, unclaimed) | In-app + daily email digest | Branch, Central Ops |
+| Approvals pending (PO, transfer, destruction, config) | In-app + email | Designated checker / approver |
+| System / integration (event replay, reconciliation break) | In-app + webhook to ops | Central Ops, Integration |
+
+- **S** Webhook / event-bus fan-out so external systems (Finance, BI, ITSM) can subscribe. **C** Quiet-hours and per-user channel preferences.
 
 ---
 
@@ -323,6 +361,8 @@ Both card types use the **same module, same data model, same custody and audit b
 
 ## 11. End-to-End Process Flows (with realistic examples)
 
+**Flow index:** A Procurement→receipt · B Verification depth · C Replenishment · D In-transit tracking · E Custodian issue & return · F Personalised collection · G Destruction & disposal · H Discrepancy→exception lifecycle · I Lost/stolen/damaged incident · J Physical verification & adjustment · K Inter-branch transfer (lateral rebalancing) · L PIN-mailer reconciliation · M Custodian handover · N Configuration change · O Branch onboarding & opening balance · P CIM↔Issuance reconciliation.
+
 ### Flow A — Procurement to receipt (multi-item order)
 
 1. **Order** — Central Ops raises `PO-2026-0160` (500 Platinum + 200 Gold) for Pune. Maker-checker approval per DOA.
@@ -364,6 +404,103 @@ Every consignment in flight (vendor→vault, vault→branch, branch→branch) is
 ### Flow F — Personalised collection (last mile)
 
 Order → produce → dispatch → **card-by-card GRN** → `AWAITING_COLLECTION` (named register) → reminders → **KYC handover** (`COLLECTED`) or **unclaimed → destroy** (blocked + certificate). PIN mailer reconciled separately.
+
+### Flow G — Destruction & disposal (damaged / expired / unclaimed → certified destruction)
+
+1. **Nominate** — stock becomes destruction-eligible: damaged at GRN/issue, `EXPIRED` by the aging job, or unclaimed personalised cards past retention. A maker raises a **Destruction Request** listing exact serials/ranges, reason code and source location.
+2. **Approve (maker-checker)** — a different authorised approver (per DOA) reviews and approves; units move `…→ PENDING_DESTRUCTION` and are excluded from all balances and issuance.
+3. **Block at source-of-truth** — on approval CIM calls the Issuance **block/close** command so the corresponding logical card records can never be activated.
+4. **Physically destroy** — at the scheduled destruction event two witnesses observe shredding/incineration per policy; method, date, witnesses and quantities are captured and a signed/scanned **Destruction Certificate** is uploaded. Units → `DESTROYED`.
+5. **Reconcile & retain** — destroyed quantities post to wastage analytics (by branch/product/vendor/reason); the destruction register is retained immutably per policy (default 10 years).
+
+> **Example:** 23 Gold kits damaged by water ingress at Pune Camp plus 11 personalised cards unclaimed > 60 days are batched into `DSR-2026-0218`. The branch custodian raises it; the regional manager approves; Issuance blocks all 34 card records; on the monthly destruction run two officers witness shredding and upload `DC-2026-0218`. Wastage attributes 23 to "transit/handling damage" and 11 to "unclaimed".
+
+### Flow H — Discrepancy → exception case → resolution
+
+Turns a control breach into a tracked, time-boxed case.
+
+1. **Raise** — a discrepancy (short/excess/damaged/tampered/serial-mismatch at GRN, day-close variance, count variance, overdue shipment, etc.) auto-creates an **ExceptionCase** with severity, owner, SLA timer and reason code. Affected stock is **quarantined / `BLOCKED`** where applicable.
+2. **Investigate** — the owner gathers evidence (scans, carrier proof, CCTV reference, vendor confirmation); case state `OPEN → INVESTIGATING`. SLA breaches escalate branch → region → centre.
+3. **Resolve** — outcome recorded with a resolution code: vendor credit note (short shipment), found-on-recount (count variance cleared), adjustment posted (genuine loss), or transfer-in matched. Linked documents attached.
+4. **Close** — `INVESTIGATING → RESOLVED → CLOSED`; quarantined stock is released, written off, or sent to destruction. The full trail is auditable and feeds vendor/branch quality metrics.
+
+> **Example:** GRN of `PO-2026-0160`'s Gold batch counts 198 against 200 declared. Case `EXC-4471` (High) opens, 198 accepted with-exceptions, the PO line stays open. Investigation shows a tamper in transit; resolution is a carrier claim plus a vendor reship of 2 — on receipt the case closes and the PO line is short-closed.
+
+### Flow I — Lost / stolen / damaged incident & hotlisting
+
+1. **Report** — a custodian/operator reports stock `LOST` / `STOLEN` (or `DAMAGED`) with serials/ranges and circumstances; a high-severity incident case opens immediately.
+2. **Contain** — affected units drop out of balances; CIM calls the Issuance **hotlist/block** command without delay so no lost/stolen kit can ever be activated.
+3. **Investigate & authorise** — branch + risk review; a maker-checker **adjustment** writes the units off against an approved reason, with **second-level authorisation** above DOA value limits.
+4. **Report out** — the incident feeds risk/compliance MIS and, where thresholds require, regulatory/fraud reporting. Trail retained immutably.
+
+> **Example:** A surprise count at Hyderabad finds `KIT-55120144` missing. Incident `EXC-5102` opens; Issuance hotlists the kit in < 1 min; CCTV is inconclusive; write-off `ADJ-2026-0733` is approved by the regional head and the kit stays permanently blocked.
+
+### Flow J — Physical verification & variance adjustment
+
+1. **Plan** — a scheduled (monthly) or **surprise** count is initiated for a location/custodian; optionally **blind** (book quantity hidden from the counter).
+2. **Count** — two officers count physical stock by serial range; entries captured by scan or double-keyed.
+3. **Compare** — the system computes variance vs book stock per product/range; zero variance → verification passed and timestamped.
+4. **Adjust** — any variance opens a discrepancy; a maker-checker **adjustment document** with reason and **second-level authorisation** corrects book stock (never a silent DB edit). Repeated variances flag the location for review.
+5. **Evidence** — the physical-verification report is archived and feeds GOV-06 reconciliation evidence and the audit pack.
+
+> **Example:** A blind monthly count at Delhi CP shows 1,498 vs book 1,500 Platinum. Variance of 2 opens `EXC-4820`; recount confirms; adjustment `ADJ-2026-0701` (reason "count variance — under") is approved at level-2 and book stock corrected.
+
+### Flow K — Inter-branch transfer (lateral rebalancing)
+
+Moves stock branch→branch (or vault↔branch) to cure imbalance before buying new plastic.
+
+1. **Identify** — overstock (days-of-cover > 90) at one branch with below-safety at another triggers a **lateral transfer suggestion** (also raisable manually).
+2. **Raise & approve** — the sender raises a **Transfer Order** (product, serial ranges, destination); maker-checker approval per DOA; committed stock → `RESERVED`.
+3. **Dispatch** — the sender packs, seals and dispatches under dual custody; units → `IN_TRANSIT`; the shipment is tracked (Flow D) and in-transit-overdue escalates.
+4. **Receive** — the destination performs a two-step **GRN** against the Transfer Order; on acceptance stock → `AT_BRANCH` at the receiver and leaves the sender's books. Discrepancy → quarantine + case.
+
+> **Example:** Delhi CP (86 days cover) → Pune Hinjawadi (net 95, ROP 350). `TRF-2026-0512` for 300 kits is approved, dispatched (`SHP-2026-0931`) and received clean two days later — averting vendor order `RP-1042`.
+
+### Flow L — PIN mailer parallel reconciliation
+
+Enforces card-and-PIN separation.
+
+1. **Order / produce** — for personalised consignments PIN mailers are produced as a **separate stream** and may be tracked as their own pipeline line (ordered / received / reconciled).
+2. **Dispatch separately** — mailers ship in a different envelope/courier run from the cards and are **acknowledged independently** at GRN.
+3. **Reconcile two counts** — the branch confirms *N cards received* and *N PIN mailers received* as two distinct reconciliations held in **separate custody**; mismatches ("PIN mailer missing", "tampered envelope") are discrepancy codes that open a case.
+4. **Issue with separation** — card and mailer are never released together by the same step unless green-PIN policy applies; green-PIN products skip the mailer stream entirely.
+
+> **Example:** Pune Camp receives 150 personalised cards (`DA-2026-0951`) on Monday and 150 PIN mailers (`DA-2026-0952`) on Wednesday via a different courier. Reconciliation matches 150:150; one envelope arrives tampered → `EXC-4905`, that mailer is quarantined and reissued.
+
+### Flow M — Custodian / vault-officer handover
+
+1. **Initiate** — on leave, transfer or role change, a **handover** is started between outgoing and incoming custodians (or vault officers).
+2. **Verify** — a full joint physical count of the working pool/vault by serial range; any variance opens a discrepancy + adjustment before the handover can complete.
+3. **Dual sign-off** — both officers (and the branch manager as joint custodian where applicable) sign off; entitlements are re-pointed to the incoming officer via IAM.
+4. **Effective** — accountability transfers with a timestamped record; the next day-open opening balance is owned by the incoming custodian.
+
+> **Example:** Custodian S. Iyer hands Pune Hinjawadi to R. Nair; the joint count of 612 kits matches book; both plus the BM sign `HOV-2026-0044`; Iyer's issue/allocate rights are revoked and Nair's activated.
+
+### Flow N — Configuration change (effective-dated, maker-checker)
+
+1. **Propose** — a maker edits a governed parameter (operating model, ROP/min/max/safety, DOA matrix, vendor mapping, alert thresholds, verification depth) with an **effective date**.
+2. **Approve** — a different checker approves per DOA; the change is **versioned, not overwritten**.
+3. **Activate on date** — the new value takes effect on the effective date; prior values remain queryable for point-in-time reporting and audit.
+4. **Propagate** — dependent engines (replenishment, exceptions) pick up the new policy on their next evaluation.
+
+> **Example:** Region West switches Platinum from centralised to decentralised effective 1-Jul-2026; POs raised before that date retain centralised routing; the DOA/model matrix records both versions for audit.
+
+### Flow O — Branch onboarding & opening-balance seeding (go-live)
+
+1. **Configure** — create the location, custody mode, products, policies and entitlements.
+2. **Physical count** — supervised count of existing stock by serial range at the branch/vault.
+3. **Seed under dual sign-off** — counted ranges are loaded as the **opening balance**; variance vs legacy registers is documented and approved before go-live.
+4. **Migrate open items** — open POs and in-transit consignments load as open documents; historical registers are archived, not migrated.
+5. **Hypercare** — manual registers are retired only after **one clean monthly reconciliation**.
+
+### Flow P — CIM ↔ Issuance reconciliation (overnight, with break handling)
+
+1. **Pull** — the nightly batch reconciles CIM physical stock/state against Issuance logical records (pre-issued pregen, issued, blocked, personalisation status).
+2. **Match** — per serial/range; the expected pairing is physical `ISSUED_TO_CUSTOMER` ↔ Issuance "issued/activated".
+3. **Break handling** — mismatches (issued logically but still in physical stock, or vice-versa) raise reconciliation exceptions routed to branch/centre with an SLA.
+4. **Resolve** — missed events are replayed, or adjustments posted with approval; a clean reconciliation is a precondition for register retirement and audit sign-off.
+
+> **Example:** The overnight run finds 3 kits marked issued in Issuance but still `WITH_OPERATOR` in CIM — a dropped issuance event. The event is replayed, balances decrement, and `EXC-5210` auto-closes.
 
 ---
 
@@ -414,6 +551,24 @@ A realistic daily cycle for a branch operating under this module:
 ### Roles (representative)
 Central Inventory Manager (PO maker), Central Inventory Approver (checker), Vault Officers ×2 (dual custody), Branch Manager (approvals, variance level-1), Branch Custodian (GRN maker, allocations, day-open/close, counts), Operator/Teller (acknowledge slips, customer issuance, end-of-day return), Risk & Compliance (read-all, oversight), Internal/External Auditor (read-only point-in-time, trace, audit trail), System/Integration (adapter scopes only). Entitlements scoped to hierarchy nodes; conflicting combinations blocked.
 
+### RACI (key activities)
+
+R = Responsible · A = Accountable · C = Consulted · I = Informed. Roles: **CIM** Central Inventory Mgr · **CIA** Central Approver · **VO** Vault Officers · **BM** Branch Manager · **BC** Branch Custodian · **OP** Operator · **R&C** Risk & Compliance.
+
+| Activity | CIM | CIA | VO | BM | BC | OP | R&C |
+|---|---|---|---|---|---|---|---|
+| Raise vendor PO (centralised) | R | A | I | I | – | – | I |
+| Approve PO / requisition | I | A/R | – | C | – | – | I |
+| Vault GRN & acceptance | I | I | A/R | – | – | – | I |
+| Branch GRN & acceptance | I | – | – | A | R | C | I |
+| Day-open / day-close balancing | – | – | – | A | R | C | I |
+| Operator issue / customer issuance | – | – | – | I | A | R | – |
+| Inter-branch transfer approval | C | – | – | A/R | C | – | I |
+| Variance adjustment (level-2) | I | A | – | R | C | – | C |
+| Destruction request & sign-off | C | A | C | R | R | – | C |
+| Configuration / policy change | R | A | – | C | – | – | C |
+| Physical / surprise verification | I | – | C | A | R | – | C |
+
 ---
 
 ## 14. Architecture & Integration (CMS-agnostic)
@@ -452,6 +607,22 @@ Balance enquiry P95 < 500ms; movement posting P95 < 1s; trace < 30s; dashboard l
 
 ### Key entities
 Institution / OperatingModelConfig · Location (hierarchy node, custody mode) · StockClass / Product / Design · Vendor / VendorSLA · PurchaseOrder / RequisitionOrder / OrderLine · DispatchAdvice / Consignment / Box · GRN / GRNLine / DiscrepancyCase · TransferOrder · Shipment / TrackingEvent · StockUnitRange / StockUnit · StockMovement (journal) · Balance (materialised) · CustodianAssignment / OperatorIssueSlip / DayBook · CollectionRecord (personalised) · PinMailerStock · ReplenishmentPolicy / ReplenishmentProposal · ForecastSeries / ForecastOverlay · ExceptionCase / AlertRule · DestructionRequest / DestructionCertificate · AuditEvent.
+
+### Core data dictionary (key attributes)
+
+Selected high-traffic entities; all additionally carry `id`, `createdAt/By`, `updatedAt/By`, and — where governed — `maker`, `checker`, `version`.
+
+| Entity | Key attributes |
+|---|---|
+| **StockUnitRange** | `batchId`, `productId`, `serialFrom`, `serialTo`, `qty`, `state`, `locationId`, `custodianId`, `parentRangeId` (lineage), `receivedAt`, `expiryDate` |
+| **StockMovement** (journal) | `movementId`, `docType`, `docRef`, `fromLocation`, `toLocation`, `productId`, `serialRange`, `qty`, `fromState`, `toState`, `reasonCode`, `maker`, `checker`, `channel`, `timestamp`, `clientRequestId` (idempotency) |
+| **Balance** (materialised) | `locationId`, `productId`, `stockClass`, `onHand`, `inTransit`, `reserved`, `blocked`, `netAvailable`, `daysOfCover`, `health`, `asOf` |
+| **GRN / GRNLine** | `grnId`, `against` (PO/ASN/Transfer), `boxId`, `sealId`, `serialRange`, `qtyDeclared`, `qtyAccepted`, `condition`, `discrepancyCode`, `receiver`, `checker`, `status` |
+| **PurchaseOrder / OrderLine** | `poId`, `vendorId`, `model`, `destination`, `status`; line: `productId`, `qty`, `batchId`, `reservedRange`, `qtyDispatched`, `qtyReceived` |
+| **CollectionRecord** | `cardRef` (masked PAN), `customerRef` (Issuance id), `branchId`, `receivedAt`, `state`, `reminderCount`, `retentionDueDate`, `pinMailerReconciled` |
+| **ReplenishmentPolicy** | `branchId`, `productId`, `safety`, `rop`, `min`, `max`, `reviewPeriod`, `orderMultiple`, `leadTime`, `effectiveFrom` |
+| **ExceptionCase** | `caseId`, `type`, `severity`, `owner`, `state`, `slaDueAt`, `escalationTier`, `resolutionCode`, `linkedDocs[]` |
+| **AuditEvent** | `eventId`, `actor`, `role`, `action`, `entityRef`, `before`, `after`, `channel`, `timestamp`, `hashPrev` (tamper-evident chain) |
 
 ### Representative API (`/inventory/v1`)
 
@@ -516,6 +687,12 @@ The accompanying React prototype demonstrates the module. Screens:
 
 The prototype uses in-memory demo data (no backend, no storage) and is packaged as a Vite + React + Tailwind project for local run or Vercel/Netlify deployment.
 
+### Accessibility & UX standards
+- **M** Target **WCAG 2.1 AA**: full keyboard operability for every flow (issue, GRN, day-close), visible focus, ARIA labelling, and form-error association.
+- **M** Status is **never conveyed by colour alone** — each health colour (red/amber/orange/green/indigo) is paired with a label and/or icon, for colour-vision deficiency.
+- **M** Minimum 4.5:1 text contrast; layout scalable to 200% zoom; data tables expose proper header semantics for screen readers.
+- **S** Localisation-ready (externalised strings, locale date/number formats, per-branch timezone display). **C** Right-to-left layout for relevant locales.
+
 ---
 
 ## 18. Implementation Roadmap
@@ -556,9 +733,73 @@ The prototype uses in-memory demo data (no backend, no storage) and is packaged 
 | Audit observations on card stock | Zero repeat findings |
 | Forecast accuracy (MAPE, A-class series) | ≤ 20% |
 
+### Test & UAT strategy
+
+| Layer | Coverage |
+|---|---|
+| **Unit / component** | Ledger invariant (`Opening + Receipts − Issues − Transfers ± Adjustments = Closing`), ROP / days-of-cover / health computation, range split & merge with lineage |
+| **Contract** | CMS adapter (stubbed + live), Issuance events, idempotency on `clientRequestId` |
+| **Integration / flow** | Each end-to-end flow A–P scripted as a scenario with expected state transitions and audit entries |
+| **Negative / control** | Day-close blocked on variance, negative-balance rejected, maker = checker rejected, replay/duplicate suppressed, offline-sync without double-decrement |
+| **Non-functional** | Load to NFR targets (§14: balance P95 < 500ms, posting < 1s, 500k movements/day), DR replay (RPO/RTO), security (OWASP ASVS L2) |
+| **UAT** | Branch-ops sign-off on the pilot (vault + 5–10 branches) with real opening-balance seeding; **exit gate = one clean monthly reconciliation** before register retirement |
+
+- Lower environments use **masked PANs / synthetic kit ranges only** — no production PAN outside production.
+
 ---
 
-## 20. Glossary
+## 20. Resilience, Offline & Edge-Case Handling
+
+Branch networks are imperfect; the module must degrade gracefully and never lose serial accountability.
+
+- **Offline day operations:** if connectivity drops, the branch app supports a constrained **offline mode** — customer issuance and operator returns are queued locally with full serial detail and synced **idempotently** (by client request ID) on reconnect. Day-close cannot finalise until the queue is drained and balanced; retries never double-decrement.
+- **Idempotency & retries:** all posting APIs are idempotent on a client request ID, so flaky branch links never create duplicate movements.
+- **Event loss / out-of-order:** Issuance events are sequenced; missed or out-of-order events are detected by reconciliation (Flow P) and replayed. The append-only **stock ledger is the source of truth**; the read model is fully rebuildable by replay.
+- **Edge cases handled explicitly:** spoilage at point of issue (operator finds a damaged kit while serving a customer → quarantine + replacement from the pool); partial / over receipt; serial ranges split across multiple movements with preserved lineage; a customer relocating before collecting a personalised card (transfer of an `AWAITING_COLLECTION` card); negative-balance attempts hard-blocked; concurrent movements on the same range serialised to prevent oversell.
+- **Disaster recovery:** RPO ≤ 5 min, RTO ≤ 2h; event replay rebuilds read models; no movement is accepted against a stale balance snapshot.
+
+---
+
+## 21. Assumptions, Constraints & Dependencies
+
+**Assumptions** — Issuance exposes the adapter contract (§14); branches have scanners or accept double-keyed entry; vendors can embed Batch IDs in embossing-file headers and send structured ASNs; enterprise IAM/SSO provides identities and MFA.
+
+**Constraints** — no full PAN stored in CIM; jurisdiction rules are delivered as **configuration, not code**; Phase-1 excludes the items in §3; destruction methods are bounded by approved environmental/security policy.
+
+**Dependencies** — Issuance Service (card metadata, events, block/hotlist), enterprise IAM, vendor integration (API/SFTP/portal), courier tracking APIs (optional, for live scans), the Finance event consumer (accounting feed), and the notification gateway (email/SMS/push/webhook).
+
+---
+
+## 22. Risks & Mitigations
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Endpoint-only scanning misses a middle card | Latent shortage discovered late | Two-person count + FIFO sequential issue + latent-discrepancy SLA window (Flow B) |
+| Vendor cannot send a structured ASN | Manual GRN, keying errors | Portal/manual ASN entry fallback; ASN capability gated in vendor onboarding |
+| Branch connectivity outage | Issuance/day-close stalls | Offline queue with idempotent sync (§20) |
+| Missed Issuance issuance event | Phantom stock, balance drift | Nightly reconciliation + event replay (Flow P) |
+| Card and PIN handled together | A usable instrument leaks | Enforced separation: separate consignment + custody (Flow L) |
+| Custodian collusion / silent edits | Fraud, audit findings | Maker-checker, dual custody, no direct DB edits, immutable hash-chained audit (§13) |
+| Opening-balance error at go-live | Persistent variance | Supervised count, dual sign-off, one clean reconciliation before register retirement (Flow O) |
+| Over-ordering / aging | Locked capital, write-offs | ROP/Max band, days-of-cover overstock detection, lateral transfer before vendor order (Flows C/K) |
+
+---
+
+## 23. Open Questions & Decisions Log
+
+| # | Question / decision | Status |
+|---|---|---|
+| 1 | Retention windows — unclaimed-card (60d) and registers (10y): confirm per jurisdiction | **Open** — Risk/Compliance |
+| 2 | Green-PIN vs physical PIN mailer per product/program | **Open** — Product |
+| 3 | Courier live-tracking integration in Phase 1 vs Phase 3 | **Decided** — Phase 3 |
+| 4 | Stock cost ownership (CIM tracks qty + emits cost feed; financial postings stay in Finance) | **Decided** — §3 |
+| 5 | ML forecasting engine approach/vendor | **Open** — Phase 4 |
+| 6 | Multi-entity / cross-border transfers permitted? | **Open** — Legal |
+| 7 | Verification-depth default per product tier (full-scan vs endpoint+count+sample) | **Open** — Ops/Risk |
+
+---
+
+## 24. Glossary
 
 | Term | Meaning |
 |---|---|
@@ -584,4 +825,14 @@ The prototype uses in-memory demo data (no backend, no storage) and is packaged 
 
 ---
 
-*End of document — Card Inventory Management Module, Consolidated Requirements v2.0.*
+## 25. Revision History
+
+| Version | Date | Author | Summary |
+|---|---|---|---|
+| 1.x | — | — | Initial drafts (superseded) |
+| 2.0 | Jun 2026 | Product / Eng | Consolidated requirements baseline |
+| 2.1 | 15 Jun 2026 | Product / Eng | Added end-to-end flows **G–P** (destruction, exception lifecycle, lost/stolen incident, physical verification, inter-branch transfer, PIN-mailer reconciliation, custodian handover, configuration change, branch onboarding, CIM↔Issuance reconciliation). New sections: **20** Resilience/Offline & Edge-Cases, **21** Assumptions/Constraints/Dependencies, **22** Risks & Mitigations, **23** Open Questions & Decisions Log, **25** Revision History. Added subsections: exception severity/SLA & escalation matrix (§8.10), notifications & alerts (§8.13), RACI matrix (§13), core data dictionary (§15), accessibility & WCAG standards (§17), test & UAT strategy (§19). TOC and version updated. |
+
+---
+
+*End of document — Card Inventory Management Module, Consolidated Requirements v2.1.*
