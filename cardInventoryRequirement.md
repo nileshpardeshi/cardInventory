@@ -4,7 +4,7 @@
 | | |
 |---|---|
 | **Document** | Card Inventory Management (CIM) — Consolidated Requirements |
-| **Version** | 2.1 (consolidated) |
+| **Version** | 2.2 (consolidated) |
 | **Date** | 15 June 2026 |
 | **Classification** | Confidential — Internal |
 | **Module placement** | Bounded context within the **Issuance Service** of the CMS |
@@ -210,8 +210,30 @@ These three numbers form the operating band, set **per branch × product**.
 ### Aging & rotation
 Aging buckets (0–30, 31–90, 91–180, 181–365, >365 days) computed from receipt date at the location. **FIFO/FEFO** enforced — issue oldest / earliest-expiry first; overrides logged with reason. Old stock signals over-ordering and approaching plastic expiry.
 
-### Forecasting metrics
-Demand history per branch × product × day. Statistical forecasts (moving average, Holt-Winters for seasonality). Accuracy tracked as **MAPE** (Mean Absolute Percentage Error) — lower is more trustworthy; ≤ 20% on high-volume series is the target.
+### Forecasting & usage-pattern metrics
+Demand history is kept per **branch × product × day**. The engine computes several candidate forecasts and **auto-selects the lowest-MAPE model per series**.
+
+**Forecast methods** (series oldest→newest, `D̄` = mean):
+- *Simple moving average (k):* `F = (1/k)·Σ(last k)`
+- *Weighted MA (recent-heavy):* `F = Σ(wᵢ·Dᵢ) / Σwᵢ`
+- *Single exponential smoothing:* `Fₜ₊₁ = α·Dₜ + (1−α)·Fₜ`
+- *Holt's linear (trend):* `Lₜ = α·Dₜ + (1−α)(Lₜ₋₁+Tₜ₋₁)`, `Tₜ = β·(Lₜ−Lₜ₋₁)+(1−β)·Tₜ₋₁`, `Fₜ₊ₘ = Lₜ + m·Tₜ`
+- *Holt-Winters (trend + day-of-week seasonality, s=7):* adds `Sₜ = γ·(Dₜ/Lₜ)+(1−γ)·Sₜ₋ₛ`, `Fₜ₊ₘ = (Lₜ+m·Tₜ)·Sₜ₋ₛ₊ₘ`
+
+**Accuracy** (back-test, error `eₜ = Dₜ − Fₜ`): **MAPE** `= (100/n)·Σ|eₜ/Dₜ|` (target ≤ 20% on high-volume series) · `MAE` · `RMSE` · Bias `MPE = (100/n)·Σ(eₜ/Dₜ)`. Lowest-MAPE model wins and is labelled in the UI.
+
+**Trend** (linear regression): slope `b = Σ(i−ī)(Dᵢ−D̄) / Σ(i−ī)²`, reported as **% of mean per period**.
+
+**Usage-pattern classification:**
+- *Volatility* `CV = σ/D̄`: Smooth `<0.5` · Variable `0.5–1.0` · Erratic `>1.0` (→ XYZ = X/Y/Z)
+- *Volume* (ABC, Pareto): A ≤ 70% · B ≤ 90% · C = rest of branch issuance
+- *Intermittency* (Syntetos–Boylan, daily): `ADI = periods / periods-with-demand`, `CV²` → Smooth / Erratic / Intermittent / Lumpy
+- *Seasonality:* day-of-week index `Sᵢ = avg(weekday i) / avg(all days)` (100 = average day), plus salary-week effects
+- *Peak ratio:* `max(Dᵢ) / D̄`
+
+**Forecast-driven replenishment** (ties to §8.7): safety stock `SS = z·σ_d·√L`; reorder point `ROP = d̄_forecast·L + SS` (z = service factor — 1.65≈95%, 2.05≈98%; L = lead-time days).
+
+**Personalised cards** are excluded from demand forecasting (named consignments, never reordered — see §9); their daily series is still classified for usage/aging insight.
 
 ### Vendor metrics
 **Lead time** (order-to-delivery; a slow vendor forces higher safety stock), **fill rate** (% of ordered quantity delivered), **defect rate** (faulty kits per delivery), discrepancy rate.
@@ -271,8 +293,11 @@ Priority: **M** = must (Phase 1), **S** = should, **C** = could.
 - **M** Near-expiry alerts at configurable horizons (180/90/30 days) with redistribute / campaign / destroy workflow.
 - **M** Wastage analytics (destroyed/expired/damaged units and cost by branch, product, vendor, reason).
 
-### 8.9 Forecasting
-- **S** Statistical forecasts at branch-product level; accuracy (MAPE) tracked; campaign/new-branch overlays with audit.
+### 8.9 Demand forecasting & usage patterns
+- **M** Per **branch × product** demand forecast from daily history, with **auto model selection by lowest MAPE** across moving-average, weighted-MA, exponential-smoothing, Holt and Holt-Winters (formulas in §7). 12-week actual + 4-week forward forecast with a confidence band. *(Demonstrated in the prototype — Branch profile.)*
+- **M** **Usage-pattern analytics** per product: trend (%/wk), volatility (CV → Smooth/Variable/Erratic, XYZ), volume class (ABC), intermittency (Syntetos–Boylan: Smooth/Erratic/Intermittent/Lumpy), **day-of-week seasonality** index and peak day, with a plain-language summary.
+- **M** Forecast accuracy surfaced as **MAPE** per series (and volume-weighted at branch level), with the winning model labelled; ≤ 20% target on high-volume (A-class) series.
+- **S** Campaign / new-branch overlays with audit; forecast feeds the replenishment ROP/order-size (§8.7).
 - **C** ML model plug-in interface for a later phase without changing replenishment logic.
 
 ### 8.10 Exception management
@@ -361,7 +386,7 @@ Both card types use the **same module, same data model, same custody and audit b
 
 ## 11. End-to-End Process Flows (with realistic examples)
 
-**Flow index:** A Procurement→receipt · B Verification depth · C Replenishment · D In-transit tracking · E Custodian issue & return · F Personalised collection · G Destruction & disposal · H Discrepancy→exception lifecycle · I Lost/stolen/damaged incident · J Physical verification & adjustment · K Inter-branch transfer (lateral rebalancing) · L PIN-mailer reconciliation · M Custodian handover · N Configuration change · O Branch onboarding & opening balance · P CIM↔Issuance reconciliation.
+**Flow index:** A Procurement→receipt · B Verification depth · C Replenishment · D In-transit tracking · E Custodian issue & return · F Personalised collection · G Destruction & disposal · H Discrepancy→exception lifecycle · I Lost/stolen/damaged incident · J Physical verification & adjustment · K Inter-branch transfer (lateral rebalancing) · L PIN-mailer reconciliation · M Custodian handover · N Configuration change · O Branch onboarding & opening balance · P CIM↔Issuance reconciliation · Q Demand forecasting & usage-pattern analysis.
 
 ### Flow A — Procurement to receipt (multi-item order)
 
@@ -501,6 +526,17 @@ Enforces card-and-PIN separation.
 4. **Resolve** — missed events are replayed, or adjustments posted with approval; a clean reconciliation is a precondition for register retirement and audit sign-off.
 
 > **Example:** The overnight run finds 3 kits marked issued in Issuance but still `WITH_OPERATOR` in CIM — a dropped issuance event. The event is replayed, balances decrement, and `EXC-5210` auto-closes.
+
+### Flow Q — Demand forecasting & usage-pattern analysis
+
+Turns daily issuance history into a forward demand signal and a usage profile, per branch × product.
+
+1. **Collect** — daily issuance per branch × product accumulates from `ISSUED_TO_CUSTOMER` events (≥ 12 weeks retained).
+2. **Forecast** — candidate models (SMA, weighted-MA, SES, Holt, Holt-Winters s=7) are back-tested; the **lowest-MAPE model is auto-selected** and projected 4 weeks ahead with a confidence band (formulas in §7).
+3. **Classify usage** — each series is tagged by trend (%/wk), volatility (CV → X/Y/Z), volume (ABC), intermittency (Smooth/Erratic/Intermittent/Lumpy) and day-of-week seasonality (peak / lightest day).
+4. **Act** — the forecast feeds replenishment (forecast-driven ROP / order size, §8.7) and surfaces in Branch & product statistics; personalised cards are excluded from forecasting (named consignments).
+
+> **Example:** Pune Hinjawadi · DEB-CLS — Holt-Winters wins (MAPE 8.6%); demand is smooth and rising slightly, peaking **Fri (+28% vs avg)** and lightest **Sun (−60%)**, and the 4-week forecast sizes the next requisition. The personalised line (DEB-PRS) is flagged **intermittent** and carries no forecast.
 
 ---
 
@@ -656,7 +692,7 @@ Selected high-traffic entities; all additionally carry `id`, `createdAt/By`, `up
 - **Role-scoped operational:** vault, branch manager, custodian, central ops — each scoped to its hierarchy node.
 
 ### Branch & product statistics (per the UX)
-- **Branch profile:** per-product position vs policy (on hand, in transit, reserved, blocked, net, cover, safety, ROP, max, health), weekly issuance by product, aging by product, today's order & movement activity (placed / in-transit / received / dispatched / issued, each as *documents (cards)*), pipeline, exceptions, and a personalised collection summary.
+- **Branch profile:** per-product position vs policy (on hand, in transit, reserved, blocked, net, cover, safety, ROP, max, health), weekly issuance by product, aging by product, **demand & forecast (12-wk actual + 4-wk forecast, best-fit model & MAPE)**, **usage pattern (day-of-week seasonality, trend, volatility, ABC/XYZ)**, today's order & movement activity (placed / in-transit / received / dispatched / issued, each as *documents (cards)*), pipeline, exceptions, and a personalised collection summary.
 - **Branch × product matrix:** net available per branch × product with health dots and totals; today's order activity by branch.
 - **Product league:** branches ranked by days-of-cover per product (lowest first).
 
@@ -673,7 +709,7 @@ The accompanying React prototype demonstrates the module. Screens:
 |---|---|
 | **Dashboard** | Network KPIs, usage-vs-forecast, branch health heat grid, lifecycle-state mix, aging |
 | **Inventory** | Network → branch drill-down; committed vs available; serial ranges; custody split |
-| **Branch & product stats** | Branch profile, branch × product matrix, product league (per §16) |
+| **Branch & product stats** | Branch profile (incl. **demand forecast + day-of-week usage pattern**, per product), branch × product matrix, product league (per §16) |
 | **Orders & vendors** | PO lifecycle, dispatch/AWB, ordered vs received (short detection), vendor SLA cards |
 | **Receive (GRN)** | Two-step acceptance; pregen box/range scan **or** personalised card-by-card + PIN reconciliation; discrepancy → quarantine + case |
 | **Transfers** | Maker-checker transfers; lateral-rebalance suggestions; overdue escalation |
@@ -832,7 +868,8 @@ Branch networks are imperfect; the module must degrade gracefully and never lose
 | 1.x | — | — | Initial drafts (superseded) |
 | 2.0 | Jun 2026 | Product / Eng | Consolidated requirements baseline |
 | 2.1 | 15 Jun 2026 | Product / Eng | Added end-to-end flows **G–P** (destruction, exception lifecycle, lost/stolen incident, physical verification, inter-branch transfer, PIN-mailer reconciliation, custodian handover, configuration change, branch onboarding, CIM↔Issuance reconciliation). New sections: **20** Resilience/Offline & Edge-Cases, **21** Assumptions/Constraints/Dependencies, **22** Risks & Mitigations, **23** Open Questions & Decisions Log, **25** Revision History. Added subsections: exception severity/SLA & escalation matrix (§8.10), notifications & alerts (§8.13), RACI matrix (§13), core data dictionary (§15), accessibility & WCAG standards (§17), test & UAT strategy (§19). TOC and version updated. |
+| 2.2 | 17 Jun 2026 | Product / Eng | **Demand forecasting & usage patterns** implemented in the prototype (product-level, per branch) and documented: expanded §7 forecasting metrics with the formulas (SMA/WMA/SES/Holt/Holt-Winters, MAPE/MAE/RMSE/bias, trend, CV, ABC/XYZ, Syntetos–Boylan, day-of-week seasonality, forecast-driven SS/ROP), rewrote **§8.9** as Demand forecasting & usage patterns, added **Flow Q**, and extended §16/§17 (Branch profile shows demand & forecast + day-of-week usage pattern). |
 
 ---
 
-*End of document — Card Inventory Management Module, Consolidated Requirements v2.1.*
+*End of document — Card Inventory Management Module, Consolidated Requirements v2.2.*

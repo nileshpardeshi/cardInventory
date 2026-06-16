@@ -4,12 +4,31 @@ import {
   RefreshCw, AlertTriangle, Route, Settings2, Search, ChevronRight, CheckCircle2,
   Clock, Truck, Factory, Building2, UserCheck, User, CreditCard,
   ShieldCheck, Scan, Landmark, CircleDot, Lock, BarChart3, ClipboardCheck,
-  Hourglass, FileSignature, Trash2
+  Hourglass, FileSignature, Trash2, TrendingUp, CalendarClock
 } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid,
-  BarChart, Bar, Cell, Legend
+  BarChart, Bar, Cell, Legend, ComposedChart, Area
 } from "recharts";
+import {
+  bestForecast, metrics, cv, trendPct, volatilityClass, xyz, sbcClass, abcClasses, peak
+} from "./lib/forecast";
+import { dailySeries, toWeekly, dowProfile } from "./lib/demandSeries";
+
+function trendBadge(t) {
+  if (t >= 2) return { sym: "▲", tone: "text-emerald-600", word: "Rising" };
+  if (t <= -2) return { sym: "▼", tone: "text-rose-600", word: "Falling" };
+  return { sym: "▬", tone: "text-slate-400", word: "Flat" };
+}
+function usageNarrative(scope, dow) {
+  const hi = [...dow].sort((a, b) => b.index - a.index)[0];
+  const lo = [...dow].sort((a, b) => a.index - b.index)[0];
+  if (scope) {
+    const tb = scope.trend >= 2 ? "rising" : scope.trend <= -2 ? "falling" : "flat";
+    return `${scope.code}: ${scope.sbc.toLowerCase()} demand · peaks ${hi.day} (+${hi.index - 100}% vs avg), lightest ${lo.day} · ${tb} trend ${Math.abs(scope.trend).toFixed(1)}%/wk.`;
+  }
+  return `Branch pregen demand peaks ${hi.day} (+${hi.index - 100}% vs avg) and is lightest ${lo.day}.`;
+}
 
 /* ----------------------------- DEMO DATA ----------------------------- */
 
@@ -1279,6 +1298,51 @@ function BranchStats({ sel, setSel, exceptions, transfers, collection = [], setV
   const inbound = transfers.filter(t => t.to === b.name && t.kind !== "done");
   const outbound = transfers.filter(t => t.from === b.name && t.kind !== "done");
 
+  /* ---- Demand forecasting & usage patterns (product-level, this branch) ---- */
+  const fx = useMemo(() => {
+    const seed = seedOf(sel);
+    const per = stats.map((p, i) => {
+      const personalised = p.cls === "Personalised";
+      const daily = dailySeries(seed + i * 17, Math.max(1, p.avgDaily), p.code);
+      const weekly = toWeekly(daily);
+      const dow = dowProfile(daily);
+      const total = daily.reduce((a, b2) => a + b2, 0);
+      const cvW = cv(weekly);
+      const base = {
+        code: p.code, name: p.name, personalised, daily, weekly, dow, total,
+        trend: trendPct(weekly), vol: volatilityClass(cvW), xyz: xyz(cvW), sbc: sbcClass(daily), peak: peak(weekly),
+      };
+      if (personalised) return { ...base, model: "N/A", mape: null, rmseDaily: 0, next7: null, fcWeekly: [null, null, null, null] };
+      const best = bestForecast(daily, { season: 7 });
+      const m = metrics(daily, best.fit);
+      const fc = Array.from({ length: 28 }, (_, k) => Math.max(0, best.forecast(k + 1)));
+      return { ...base, model: best.name, mape: m.mape, rmseDaily: m.rmse, next7: Math.round(fc.slice(0, 7).reduce((a, b2) => a + b2, 0)), fcWeekly: toWeekly(fc) };
+    });
+    const abc = abcClasses(per.map(p => ({ code: p.code, total: p.total })));
+    per.forEach(p => { p.abc = p.personalised ? "—" : abc[p.code]; });
+    const pregen = per.filter(p => !p.personalised);
+    const totWt = pregen.reduce((a, p) => a + p.total, 0) || 1;
+    return { per, pregen, next7: pregen.reduce((a, p) => a + (p.next7 || 0), 0), wmape: pregen.reduce((a, p) => a + (p.mape || 0) * p.total, 0) / totWt };
+  }, [sel, stats]);
+
+  const scope = prodFilter === "ALL" ? null : fx.per.find(p => p.code === prodFilter);
+  const aggBase = fx.pregen.length ? fx.pregen : fx.per;
+  const wkActual = scope ? scope.weekly : (aggBase[0]?.weekly.map((_, k) => aggBase.reduce((a, p) => a + p.weekly[k], 0)) || []);
+  const showFc = !scope || !scope.personalised;
+  const wkFc = showFc ? (scope ? scope.fcWeekly : (aggBase[0]?.fcWeekly.map((_, k) => aggBase.reduce((a, p) => a + (p.fcWeekly[k] || 0), 0)) || [])) : [];
+  const rmseW = (scope ? scope.rmseDaily : Math.sqrt(fx.pregen.reduce((a, p) => a + p.rmseDaily ** 2, 0))) * Math.sqrt(7);
+  const zBand = 1.28;
+  const fcChart = [
+    ...wkActual.map((v, k) => ({ w: `W-${wkActual.length - k}`, actual: Math.round(v) })),
+    ...wkFc.map((v, k) => ({ w: `W+${k + 1}`, forecast: Math.round(v), lo: Math.round(Math.max(0, v - zBand * rmseW)), bandWidth: Math.round(2 * zBand * rmseW) })),
+  ];
+  if (showFc && wkActual.length && wkFc.length) fcChart[wkActual.length - 1].forecast = fcChart[wkActual.length - 1].actual;
+  const scopeDaily = scope ? scope.daily : (aggBase[0]?.daily.map((_, i) => aggBase.reduce((a, p) => a + p.daily[i], 0)) || []);
+  const dowData = dowProfile(scopeDaily);
+  const scopeModel = scope ? scope.model : "blended best-fit";
+  const scopeMape = scope ? scope.mape : fx.wmape;
+  const scopeNext7 = scope ? scope.next7 : fx.next7;
+
   return (
     <div className="space-y-6">
       <SectionTitle icon={BarChart3} title="Branch & product statistics" sub="Everything from the branch's perspective: per-product position vs policy, demand, aging, pipeline and exceptions"
@@ -1373,11 +1437,13 @@ function BranchStats({ sel, setSel, exceptions, transfers, collection = [], setV
           <Card className="overflow-x-auto">
             <table className="w-full">
               <thead className="border-b border-slate-200 bg-slate-50">
-                <tr><Th>Product</Th><Th>Class</Th><Th className="text-right">On hand</Th><Th className="text-right">In transit</Th><Th className="text-right">Reserved</Th><Th className="text-right">Blocked</Th><Th className="text-right">Net avail.</Th><Th className="text-right">Avg/day</Th><Th className="text-right">Cover (d)</Th><Th className="text-right">Safety</Th><Th className="text-right">ROP</Th><Th className="text-right">Max</Th><Th>Status</Th></tr>
+                <tr><Th>Product</Th><Th>Class</Th><Th className="text-right">On hand</Th><Th className="text-right">In transit</Th><Th className="text-right">Reserved</Th><Th className="text-right">Blocked</Th><Th className="text-right">Net avail.</Th><Th className="text-right">Avg/day</Th><Th className="text-right">Cover (d)</Th><Th className="text-right">Safety</Th><Th className="text-right">ROP</Th><Th className="text-right">Max</Th><Th className="text-right">Fcst/wk</Th><Th className="text-right">Trend</Th><Th>Pattern</Th><Th className="text-right">MAPE</Th><Th>Status</Th></tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {shown.map(p => {
                   const ph = productHealth(p);
+                  const fa = fx.per.find(a => a.code === p.code);
+                  const tb = fa ? trendBadge(fa.trend) : null;
                   return (
                     <tr key={p.code} className="hover:bg-slate-50">
                       <Td className="font-medium text-slate-900"><span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-sm" style={{ background: PRODUCT_COLORS[p.code] }} />{p.name}</span></Td>
@@ -1392,6 +1458,10 @@ function BranchStats({ sel, setSel, exceptions, transfers, collection = [], setV
                       <Td className="text-right font-mono text-slate-500">{p.safety}</Td>
                       <Td className="text-right font-mono text-slate-500">{p.rop}</Td>
                       <Td className="text-right font-mono text-slate-500">{p.max}</Td>
+                      <Td className="text-right font-mono">{fa && fa.fcWeekly[0] != null ? Math.round(fa.fcWeekly[0]).toLocaleString() : "—"}</Td>
+                      <Td className="text-right font-mono">{tb ? <span className={tb.tone}>{tb.sym} {Math.abs(fa.trend).toFixed(1)}%</span> : "—"}</Td>
+                      <Td className="text-xs">{fa ? (fa.personalised ? <span className="text-slate-400">Named</span> : <span className="font-medium text-slate-700">{fa.abc}{fa.xyz} · {fa.vol}</span>) : "—"}</Td>
+                      <Td className="text-right font-mono">{fa && fa.mape != null ? `${fa.mape.toFixed(0)}%` : "—"}</Td>
                       <Td><span className="inline-flex items-center gap-1.5 text-xs font-medium" style={{ color: ph.color }}><span className="h-2 w-2 rounded-full" style={{ background: ph.color }} />{ph.label}</span></Td>
                     </tr>
                   );
@@ -1429,6 +1499,73 @@ function BranchStats({ sel, setSel, exceptions, transfers, collection = [], setV
                     {PRODUCTS.map(p => <Bar key={p.code} dataKey={p.code} stackId="a" fill={PRODUCT_COLORS[p.code]} />)}
                   </BarChart>
                 </ResponsiveContainer>
+              </div>
+            </Card>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            <Card className="p-4">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-800"><TrendingUp className="h-4 w-4 text-indigo-600" />Demand &amp; forecast · {scope ? scope.name : "all pregen products"}</h3>
+                <Badge tone="indigo">{scopeModel}{scopeMape != null ? ` · MAPE ${scopeMape.toFixed(1)}%` : ""}</Badge>
+              </div>
+              <div className="mb-3 grid grid-cols-2 gap-3">
+                <div className="rounded-lg border border-slate-200 p-2.5">
+                  <div className="text-xs uppercase tracking-wide text-slate-500">Forecast · next 7 days</div>
+                  <div className="mt-0.5 font-mono text-lg font-semibold text-slate-900">{scopeNext7 != null ? scopeNext7.toLocaleString() : "—"} <span className="text-xs font-normal text-slate-500">cards</span></div>
+                </div>
+                <div className="rounded-lg border border-slate-200 p-2.5">
+                  <div className="text-xs uppercase tracking-wide text-slate-500">Forecast accuracy</div>
+                  <div className="mt-0.5 font-mono text-lg font-semibold text-emerald-600">{scopeMape != null ? `MAPE ${scopeMape.toFixed(1)}%` : "N/A"}</div>
+                </div>
+              </div>
+              <div className="h-52">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={fcChart} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                    <XAxis dataKey="w" tick={{ fontSize: 10 }} stroke="#94A3B8" interval={1} />
+                    <YAxis tick={{ fontSize: 11 }} stroke="#94A3B8" />
+                    <Tooltip />
+                    <Area dataKey="lo" stackId="band" stroke="none" fill="transparent" isAnimationActive={false} legendType="none" />
+                    <Area dataKey="bandWidth" name="80% interval" stackId="band" stroke="none" fill="#6366F1" fillOpacity={0.12} isAnimationActive={false} legendType="none" />
+                    <Line dataKey="actual" name="Actual" stroke="#4F46E5" strokeWidth={2} dot={false} isAnimationActive={false} />
+                    <Line dataKey="forecast" name="Forecast" stroke="#94A3B8" strokeDasharray="5 4" strokeWidth={2} dot={false} isAnimationActive={false} connectNulls />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="mt-1 text-xs text-slate-500">12 weeks actual + 4 weeks forecast · best-fit model auto-selected by lowest MAPE{showFc ? " · shaded band = 80% interval" : " · forecasting off for personalised (named cards)"}.</p>
+            </Card>
+
+            <Card className="p-4">
+              <div className="mb-3 flex items-center gap-2"><CalendarClock className="h-4 w-4 text-indigo-600" /><h3 className="text-sm font-semibold text-slate-800">Usage pattern · day of week</h3></div>
+              <div className="h-40">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={dowData} margin={{ top: 4, right: 8, bottom: 0, left: -16 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                    <XAxis dataKey="day" tick={{ fontSize: 11 }} stroke="#94A3B8" />
+                    <YAxis tick={{ fontSize: 11 }} stroke="#94A3B8" />
+                    <Tooltip formatter={v => [`${v} (100 = avg day)`, "Index"]} />
+                    <Bar dataKey="index" name="vs avg" radius={[3, 3, 0, 0]}>
+                      {dowData.map((d, i) => <Cell key={i} fill={d.index >= 110 ? "#4F46E5" : d.index <= 80 ? "#FB923C" : "#94A3B8"} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="mt-1.5 text-xs text-slate-600">{usageNarrative(scope, dowData)}</p>
+              <div className="mt-2 space-y-1.5 text-xs">
+                {fx.per.map(p => {
+                  const tb = trendBadge(p.trend);
+                  return (
+                    <div key={p.code} className="flex items-center justify-between gap-2 border-b border-slate-100 pb-1">
+                      <span className="flex items-center gap-1.5 font-medium text-slate-700"><span className="h-2 w-2 rounded-sm" style={{ background: PRODUCT_COLORS[p.code] }} />{p.code}</span>
+                      <span className="flex items-center gap-2">
+                        <span className={`font-mono ${tb.tone}`}>{tb.sym} {Math.abs(p.trend).toFixed(1)}%/wk</span>
+                        <Badge tone={p.vol === "Smooth" ? "green" : p.vol === "Variable" ? "amber" : "rose"}>{p.personalised ? p.sbc : p.vol}</Badge>
+                        <Badge tone="slate">{p.personalised ? "Named" : `${p.abc}${p.xyz}`}</Badge>
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </Card>
           </div>
