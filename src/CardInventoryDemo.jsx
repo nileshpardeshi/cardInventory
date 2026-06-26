@@ -4,7 +4,7 @@ import {
   RefreshCw, AlertTriangle, Route, Settings2, Search, ChevronRight, CheckCircle2,
   Clock, Truck, Factory, Building2, UserCheck, User, CreditCard,
   ShieldCheck, Scan, Landmark, CircleDot, Lock, BarChart3, ClipboardCheck,
-  Hourglass, FileSignature, Trash2, TrendingUp, CalendarClock
+  Hourglass, FileSignature, Trash2, TrendingUp, CalendarClock, Inbox, FileWarning
 } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid,
@@ -14,6 +14,10 @@ import {
   bestForecast, metrics, cv, trendPct, volatilityClass, xyz, sbcClass, abcClasses, peak
 } from "./lib/forecast";
 import { dailySeries, toWeekly, dowProfile } from "./lib/demandSeries";
+import { SEV, Badge, Card, SectionTitle, Kpi, Th, Td } from "./components/ui";
+import ReceiptAck from "./components/ReceiptAck";
+import Discrepancies from "./components/Discrepancies";
+import { INITIAL_EXPECTED_RECEIPTS, INITIAL_DISCREPANCIES } from "./lib/receipts";
 
 function trendBadge(t) {
   if (t >= 2) return { sym: "▲", tone: "text-emerald-600", word: "Rising" };
@@ -410,54 +414,7 @@ const INITIAL_OPERATORS = [
 ];
 
 /* --------------------------- UI PRIMITIVES --------------------------- */
-
-const SEV = { High: "bg-rose-100 text-rose-700", Medium: "bg-amber-100 text-amber-700", Low: "bg-slate-200 text-slate-600" };
-
-function Badge({ tone = "slate", children }) {
-  const map = {
-    slate: "bg-slate-200 text-slate-700", green: "bg-emerald-100 text-emerald-700",
-    amber: "bg-amber-100 text-amber-700", rose: "bg-rose-100 text-rose-700",
-    indigo: "bg-indigo-100 text-indigo-700", sky: "bg-sky-100 text-sky-700",
-  };
-  return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${map[tone]}`}>{children}</span>;
-}
-
-function Card({ children, className = "" }) {
-  return <div className={`rounded-xl border border-slate-200 bg-white shadow-sm ${className}`}>{children}</div>;
-}
-
-function SectionTitle({ icon: Icon, title, sub, right }) {
-  return (
-    <div className="mb-4 flex items-end justify-between gap-4">
-      <div>
-        <div className="flex items-center gap-2">
-          {Icon && <Icon className="h-5 w-5 text-indigo-600" />}
-          <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
-        </div>
-        {sub && <p className="mt-0.5 text-sm text-slate-500">{sub}</p>}
-      </div>
-      {right}
-    </div>
-  );
-}
-
-function Kpi({ label, value, sub, tone = "slate" }) {
-  const tones = { slate: "text-slate-900", rose: "text-rose-600", amber: "text-amber-600", green: "text-emerald-600", indigo: "text-indigo-600" };
-  return (
-    <Card className="p-4">
-      <div className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</div>
-      <div className={`mt-1 font-mono text-2xl font-semibold ${tones[tone]}`}>{value}</div>
-      {sub && <div className="mt-1 text-xs text-slate-500">{sub}</div>}
-    </Card>
-  );
-}
-
-function Th({ children, className = "" }) {
-  return <th className={`px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 ${className}`}>{children}</th>;
-}
-function Td({ children, className = "" }) {
-  return <td className={`px-3 py-2.5 text-sm text-slate-700 ${className}`}>{children}</td>;
-}
+/* Shared primitives now live in ./components/ui (imported at the top of this file). */
 
 /* ------------------------------ VIEWS ------------------------------- */
 
@@ -2021,12 +1978,14 @@ const NAV = [
   { id: "branchstats", label: "Branch & product stats", icon: BarChart3 },
   { id: "orders", label: "Orders & vendors", icon: ShoppingCart },
   { id: "grn", label: "Receive (GRN)", icon: PackageCheck },
+  { id: "receiptack", label: "Receipt & Ack", icon: Inbox },
   { id: "transfers", label: "Transfers", icon: ArrowLeftRight },
   { id: "intransit", label: "In-transit tracking", icon: Truck },
   { id: "custodian", label: "Custodian day book", icon: Vault },
   { id: "collection", label: "Card collection", icon: CreditCard },
   { id: "replenish", label: "Replenishment", icon: RefreshCw },
   { id: "exceptions", label: "Exceptions", icon: AlertTriangle },
+  { id: "discrepancies", label: "Discrepancies", icon: FileWarning },
   { id: "trace", label: "Serial trace", icon: Route },
   { id: "settings", label: "Settings", icon: Settings2 },
 ];
@@ -2043,16 +2002,21 @@ export default function CardInventoryDemo() {
   const [ops, setOps] = useState(INITIAL_OPERATORS);
   const [pool, setPool] = useState(CUSTODIAN_INIT);
   const [collection, setCollection] = useState(INITIAL_COLLECTION);
+  const [expectedReceipts, setExpectedReceipts] = useState(INITIAL_EXPECTED_RECEIPTS);
+  const [discrepancies, setDiscrepancies] = useState(INITIAL_DISCREPANCIES);
   const [dayClosed, setDayClosed] = useState(false);
   const [toastMsg, setToastMsg] = useState(null);
 
   const toast = msg => { setToastMsg(msg); window.clearTimeout(toast._t); toast._t = window.setTimeout(() => setToastMsg(null), 4200); };
   const addException = e => setExceptions(p => [e, ...p]);
+  const addDiscrepancy = d => setDiscrepancies(p => [d, ...p]);
 
   const grnPending = grns.filter(g => g.status === "Awaiting receipt").length;
   const propPending = proposals.filter(p => p.status === "Pending").length;
   const collectOverdue = collection.filter(c => (c.status.includes("Awaiting") || c.status.includes("Unclaimed")) && collectionBucket(c).key === "overdue").length;
   const shipOverdue = shipments.filter(s => s.overdue).length;
+  const receiptOpen = expectedReceipts.filter(er => er.status !== "IN_BRANCH_VAULT").length;
+  const discActive = discrepancies.filter(d => d.status !== "Closed" && d.status !== "Resolved").length;
 
   return (
     <div className="flex min-h-screen bg-slate-100 text-slate-900" style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" }}>
@@ -2076,6 +2040,8 @@ export default function CardInventoryDemo() {
               {n.id === "collection" && collectOverdue > 0 && <span className="rounded-full bg-rose-500 px-1.5 text-xs font-semibold text-white">{collectOverdue}</span>}
               {n.id === "intransit" && shipOverdue > 0 && <span className="rounded-full bg-rose-500 px-1.5 text-xs font-semibold text-white">{shipOverdue}</span>}
               {n.id === "exceptions" && <span className="rounded-full bg-rose-500 px-1.5 text-xs font-semibold text-white">{exceptions.filter(e => e.sev === "High").length}</span>}
+              {n.id === "receiptack" && receiptOpen > 0 && <span className="rounded-full bg-amber-400 px-1.5 text-xs font-semibold text-slate-900">{receiptOpen}</span>}
+              {n.id === "discrepancies" && discActive > 0 && <span className="rounded-full bg-rose-500 px-1.5 text-xs font-semibold text-white">{discActive}</span>}
             </button>
           ))}
         </nav>
@@ -2110,12 +2076,14 @@ export default function CardInventoryDemo() {
           {view === "branchstats" && <BranchStats sel={branchSel} setSel={setBranchSel} exceptions={exceptions} transfers={transfers} collection={collection} setView={setView} />}
           {view === "orders" && <Orders />}
           {view === "grn" && <Receiving grns={grns} setGrns={setGrns} addException={addException} toast={toast} setCollection={setCollection} />}
+          {view === "receiptack" && <ReceiptAck expectedReceipts={expectedReceipts} setExpectedReceipts={setExpectedReceipts} discrepancies={discrepancies} addDiscrepancy={addDiscrepancy} addException={addException} toast={toast} branches={BRANCHES} products={PRODUCTS} productColors={PRODUCT_COLORS} />}
           {view === "transfers" && <Transfers transfers={transfers} setTransfers={setTransfers} toast={toast} />}
           {view === "intransit" && <InTransit shipments={shipments} toast={toast} />}
           {view === "custodian" && <Custodian ops={ops} setOps={setOps} pool={pool} setPool={setPool} dayClosed={dayClosed} setDayClosed={setDayClosed} toast={toast} addException={addException} />}
           {view === "collection" && <Collection records={collection} setRecords={setCollection} toast={toast} addException={addException} />}
           {view === "replenish" && <Replenishment proposals={proposals} setProposals={setProposals} model={model} toast={toast} />}
           {view === "exceptions" && <Exceptions exceptions={exceptions} />}
+          {view === "discrepancies" && <Discrepancies discrepancies={discrepancies} setDiscrepancies={setDiscrepancies} toast={toast} branches={BRANCHES} />}
           {view === "trace" && <Trace />}
           {view === "settings" && <SettingsView model={model} setModel={setModel} toast={toast} />}
         </main>
