@@ -4,18 +4,21 @@
 import { useState } from "react";
 import {
   PackageCheck, Truck, ShieldCheck, Search, X, AlertTriangle, FileText,
-  ArrowLeftRight, Inbox, CheckCircle2,
+  ArrowLeftRight, Inbox, CheckCircle2, CreditCard, KeyRound,
 } from "lucide-react";
 import { Card, Badge, Kpi, SectionTitle, Th, Td } from "./ui";
 import {
   statusMeta, reasonMeta, reasonSlas, officersFor,
   verifyRows, nextDiscId, nextExcId, matchesSearch, DISCREPANCY_REASONS,
+  classOf, reissueSrFor, TERMINAL_STATUS,
 } from "../lib/receipts";
 
 const stamp = () => {
   const d = new Date();
   return `27 Jun 2026 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 };
+const dateStamp = () => "27 Jun 2026";
+const NAMED_STATUS = ["Present", "Missing", "Damaged", "Wrong customer"];
 
 function StatusPill({ status }) {
   const m = statusMeta(status);
@@ -153,6 +156,83 @@ function Stage2Modal({ er, branchName, productName, onClose, onAccept }) {
   );
 }
 
+/* ------------------------------ Stage-2 personalised (card-by-card) ------------------------------ */
+function PersonalisedVerifyModal({ er, branchName, onClose, onAccept }) {
+  const officers = officersFor(er.branch);
+  const stage1By = er.stage1?.by;
+  const pickable = officers.filter(o => o !== stage1By);
+  const [rows, setRows] = useState(() => (er.namedCards || []).map(c => ({ ...c, st: "Present" })));
+  const greenPin = !er.pinConsignment;
+  const pinExpected = er.pinConsignment?.expectedMailers || 0;
+  const [pinReceived, setPinReceived] = useState(pinExpected);
+  const [verifiedBy, setVerifiedBy] = useState(pickable[0] || officers[0]);
+  const [checker, setChecker] = useState(pickable[1] || pickable[0] || officers[0]);
+  const [blind, setBlind] = useState(false);
+
+  const setSt = (id, st) => setRows(rs => rs.map(r => r.cardId === id ? { ...r, st } : r));
+  const present = rows.filter(r => r.st === "Present").length;
+  const reissue = rows.length - present;
+  const pinShort = greenPin ? 0 : Math.max(0, pinExpected - (Number(pinReceived) || 0));
+  const sodOk = verifiedBy !== stage1By && checker !== stage1By && checker !== verifiedBy;
+
+  return (
+    <Overlay onClose={onClose} wide>
+      <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-800"><CreditCard className="h-4 w-4 text-indigo-600" />Stage 2 · Personalised verification — Job {er.jobExecId} · {branchName}</h3>
+        <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="h-4 w-4" /></button>
+      </div>
+      <div className="space-y-3 px-5 py-4 text-sm">
+        <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600">
+          <span>Gate-received by <span className="font-medium text-slate-800">{stage1By || "—"}</span></span>
+          <span>Named cards <span className="font-mono font-semibold">{rows.length}</span> · {greenPin ? "Green PIN (no mailer)" : `PIN mailers ${pinExpected}`}</span>
+          <button onClick={() => setRows(rs => rs.map(r => ({ ...r, st: "Present" })))} className="ml-auto rounded-lg border border-slate-300 px-2 py-1 font-medium text-slate-600 hover:bg-slate-50">✓ Mark all present</button>
+          <label className="flex items-center gap-1.5"><input type="checkbox" checked={blind} onChange={e => setBlind(e.target.checked)} />Blind</label>
+        </div>
+        <div className="max-h-72 overflow-y-auto rounded-lg border border-slate-200">
+          <table className="w-full">
+            <thead className="sticky top-0 border-b border-slate-200 bg-slate-50"><tr><Th>Card ID</Th><Th>Masked PAN</Th><Th>Customer</Th><Th>SR</Th><Th>Status</Th></tr></thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map(r => (
+                <tr key={r.cardId} className={r.st !== "Present" ? "bg-rose-50/40" : ""}>
+                  <Td className="font-mono text-xs text-indigo-700">{r.cardId}</Td>
+                  <Td className="font-mono text-xs text-slate-500">{r.pan}</Td>
+                  <Td className="text-sm">{r.customer}</Td>
+                  <Td className="font-mono text-xs text-slate-500">{r.sr}</Td>
+                  <Td><select value={r.st} onChange={e => setSt(r.cardId, e.target.value)} className={`rounded border px-1.5 py-1 text-xs ${r.st === "Present" ? "border-slate-300" : "border-rose-300 bg-rose-50 text-rose-700"}`}>{NAMED_STATUS.map(s => <option key={s} value={s}>{s}</option>)}</select></Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!greenPin && (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 p-2.5 text-xs">
+            <KeyRound className="h-3.5 w-3.5 text-slate-500" />PIN mailers (separate consignment): expected <span className="font-mono font-semibold">{pinExpected}</span> · received
+            <input type="number" min={0} value={pinReceived} onChange={e => setPinReceived(e.target.value)} className="w-16 rounded border border-slate-300 px-1.5 py-0.5 text-right font-mono" />
+            {pinShort > 0 && <span className="font-medium text-amber-600">Δ −{pinShort} → MISSING_PIN_MAILER (gates handover, not vaulting)</span>}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-4 text-xs">
+          <span>Present → collection: <span className="font-mono font-semibold text-emerald-600">{present}</span></span>
+          <span>Reissue: <span className="font-mono font-semibold text-rose-600">{reissue}</span></span>
+          {!greenPin && <span>PIN short: <span className="font-mono font-semibold text-amber-600">{pinShort}</span></span>}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Verified by (custodian)"><select value={verifiedBy} onChange={e => setVerifiedBy(e.target.value)} className="w-full rounded-lg border border-slate-300 px-2 py-1.5">{officers.map(o => <option key={o} disabled={o === stage1By}>{o}</option>)}</select></Field>
+          <Field label="Checker (joint officer)"><select value={checker} onChange={e => setChecker(e.target.value)} className="w-full rounded-lg border border-slate-300 px-2 py-1.5">{officers.map(o => <option key={o} disabled={o === stage1By}>{o}</option>)}</select></Field>
+        </div>
+        {!sodOk && <div className="flex items-center gap-2 rounded-lg bg-rose-50 p-2 text-xs text-rose-700"><AlertTriangle className="h-3.5 w-3.5" />Verifier &amp; checker must differ from each other and from the Stage-1 receiver ({stage1By}).</div>}
+      </div>
+      <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
+        <button onClick={onClose} className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button disabled={!sodOk} onClick={() => onAccept(er, { rows, verifiedBy, checker, blind, greenPin, pinExpected, pinReceived: Number(pinReceived) || 0 })}
+          className={`rounded-lg px-3 py-1.5 text-sm font-medium text-white ${sodOk ? "bg-emerald-600 hover:bg-emerald-500" : "cursor-not-allowed bg-slate-300"}`}>
+          {reissue ? `Accept ${present} → collection · raise ${reissue} reissue(s)` : `Accept ${present} → awaiting collection`}
+        </button>
+      </div>
+    </Overlay>
+  );
+}
+
 /* ------------------------------ small helpers ------------------------------ */
 function Overlay({ children, onClose, wide }) {
   return (
@@ -166,11 +246,12 @@ function Field({ label, children }) {
 }
 
 /* ------------------------------ main screen ------------------------------ */
-export default function ReceiptAck({ expectedReceipts, setExpectedReceipts, addDiscrepancy, addException, toast, branches, products, productColors }) {
+export default function ReceiptAck({ expectedReceipts, setExpectedReceipts, addDiscrepancy, addException, toast, setCollection, branches, products, productColors }) {
   const [tab, setTab] = useState("worklist");
   const [src, setSrc] = useState("ALL");
+  const [klass, setKlass] = useState("ALL");
   const [branch, setBranch] = useState("ALL");
-  const [statusF, setStatusF] = useState("ALL");
+  const [statusF] = useState("ALL");
   const [q, setQ] = useState("");
   const [stage1, setStage1] = useState(null);
   const [stage2, setStage2] = useState(null);
@@ -178,10 +259,11 @@ export default function ReceiptAck({ expectedReceipts, setExpectedReceipts, addD
   const branchName = id => (branches.find(b => b.id === id)?.name) || id;
   const productName = code => (products.find(p => p.code === code)?.name) || code;
 
-  const open = expectedReceipts.filter(er => er.status !== "IN_BRANCH_VAULT");
-  const done = expectedReceipts.filter(er => er.status === "IN_BRANCH_VAULT");
+  const open = expectedReceipts.filter(er => !TERMINAL_STATUS.includes(er.status));
+  const done = expectedReceipts.filter(er => TERMINAL_STATUS.includes(er.status));
   const list = (tab === "worklist" ? open : done).filter(er =>
     (src === "ALL" || er.source === src) &&
+    (klass === "ALL" || classOf(er) === klass) &&
     (branch === "ALL" || er.branch === branch) &&
     (statusF === "ALL" || er.status === statusF) &&
     matchesSearch(er, q));
@@ -251,6 +333,59 @@ export default function ReceiptAck({ expectedReceipts, setExpectedReceipts, addD
     setStage2(null);
   }
 
+  /* Stage-2 accept — personalised (card-by-card → collection register + reissue) */
+  function acceptPersonalised(er, payload) {
+    const { rows, verifiedBy, checker, greenPin, pinExpected, pinReceived } = payload;
+    const today = dateStamp();
+    const recs = rows.filter(r => r.st === "Present").map(c => ({
+      id: c.cardId, customer: c.customer, app: c.sr, pan: c.pan,
+      branch: branchName(er.branch), received: today, ageDays: 0, status: "Awaiting collection", batch: er.file,
+    }));
+    if (recs.length && setCollection) setCollection(prev => [...recs, ...prev]);
+
+    const newDiscs = [];
+    rows.filter(r => r.st !== "Present").forEach((c, i) => {
+      const reason = c.st === "Missing" ? "CARD_MISSING_NAMED" : c.st === "Damaged" ? "DAMAGED_PERSONALISED" : "WRONG_CUSTOMER";
+      const rm = reasonMeta(reason);
+      const excId = nextExcId(newDiscs);
+      const reissue = reissueSrFor(c.sr, i);
+      newDiscs.push({
+        discId: nextDiscId(newDiscs), source: "VENDOR", cardClass: "PERSONALISED", ref: er.jobExecId, file: er.file,
+        branch: er.branch, product: er.product, sr: c.sr, lot: c.cardId, reason,
+        expected: 1, received: c.st === "Missing" ? 0 : 1, variance: c.st === "Missing" ? -1 : 0,
+        sev: rm.sev, status: "Open", owner: "Custodian", sla: reasonSlas[rm.sev], linkedException: excId,
+        raisedAt: stamp(), raisedBy: verifiedBy, reissueSr: reissue,
+        note: `${rm.label} for ${c.customer} (${c.cardId}) → reissue ${reissue} raised.`,
+        timeline: [{ at: stamp(), who: verifiedBy, what: "Raised at card-by-card verification" }],
+      });
+    });
+    if (!greenPin && pinExpected - pinReceived > 0) {
+      const excId = nextExcId(newDiscs);
+      newDiscs.push({
+        discId: nextDiscId(newDiscs), source: "VENDOR", cardClass: "PERSONALISED", ref: er.jobExecId,
+        branch: er.branch, product: er.product, sr: "—", lot: er.pinConsignment?.id || "PIN consignment",
+        reason: "MISSING_PIN_MAILER", expected: pinExpected, received: pinReceived, variance: pinReceived - pinExpected,
+        sev: "Medium", status: "Open", owner: "Custodian", sla: reasonSlas.Medium, linkedException: excId,
+        raisedAt: stamp(), raisedBy: verifiedBy,
+        note: `PIN mailers short by ${pinExpected - pinReceived}; handover blocked for affected cards until PIN resolved (or Green PIN).`,
+        timeline: [{ at: stamp(), who: verifiedBy, what: "Raised at PIN reconciliation" }],
+      });
+    }
+    newDiscs.forEach(d => {
+      addDiscrepancy(d);
+      addException({ id: d.linkedException, sev: d.sev, type: `GRN discrepancy — ${reasonMeta(d.reason).label}`, where: `${branchName(er.branch)} · Job ${d.ref}`, note: d.note, sla: d.sla, status: "Open" });
+    });
+    const cardExceptions = rows.filter(r => r.st !== "Present").length;
+    const pinShort = greenPin ? 0 : Math.max(0, pinExpected - pinReceived);
+    const newStatus = cardExceptions ? "PARTIALLY_ACCEPTED" : "AWAITING_COLLECTION";
+    setExpectedReceipts(prev => prev.map(x => x.id === er.id ? {
+      ...x, status: newStatus,
+      stage2: { by: verifiedBy, checker, at: stamp(), acceptedQty: recs.length, toCollection: recs.length, reissues: cardExceptions, pinShort, blind: payload.blind },
+    } : x));
+    toast(`${recs.length} named card(s) → awaiting collection${cardExceptions ? ` · ${cardExceptions} reissue(s) raised` : ""}${pinShort ? ` · PIN short ${pinShort}` : ""}`);
+    setStage2(null);
+  }
+
   const srcIcon = s => (s === "VENDOR" ? Truck : ArrowLeftRight);
 
   return (
@@ -269,13 +404,18 @@ export default function ReceiptAck({ expectedReceipts, setExpectedReceipts, addD
         <Kpi label="Open inbound" value={kpis.inbound} sub="awaiting receipt/verify" tone="indigo" />
         <Kpi label="In transit" value={kpis.inTransit} sub="awaiting Stage-1 gate receipt" tone="amber" />
         <Kpi label="Awaiting verify" value={kpis.awaiting} sub="Stage-2 custodian count" tone="amber" />
-        <Kpi label="In branch vault" value={kpis.vault} sub="completed GRNs" tone="green" />
+        <Kpi label="Completed" value={kpis.vault} sub="vault / awaiting collection" tone="green" />
       </div>
 
       <Card className="flex flex-wrap items-center gap-3 p-3">
         <div className="flex items-center gap-1 rounded-lg border border-slate-200 p-1">
           {[["ALL", "All"], ["VENDOR", "Vendor"], ["TRANSFER", "Transfer"]].map(([id, label]) => (
             <button key={id} onClick={() => setSrc(id)} className={`rounded-md px-2.5 py-1 text-sm font-medium transition ${src === id ? "bg-slate-800 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{label}</button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1 rounded-lg border border-slate-200 p-1">
+          {[["ALL", "All"], ["PREGEN", "Pregen"], ["PERSONALISED", "Personalised"]].map(([id, label]) => (
+            <button key={id} onClick={() => setKlass(id)} className={`rounded-md px-2.5 py-1 text-sm font-medium transition ${klass === id ? "bg-indigo-600 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{label}</button>
           ))}
         </div>
         <select value={branch} onChange={e => setBranch(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm">
@@ -292,7 +432,7 @@ export default function ReceiptAck({ expectedReceipts, setExpectedReceipts, addD
       <Card className="overflow-x-auto">
         <table className="w-full">
           <thead className="border-b border-slate-200 bg-slate-50">
-            <tr><Th>Reference</Th><Th>Source</Th><Th>Branch</Th><Th>Product</Th><Th className="text-right">Exp. qty</Th><Th>Serial range</Th><Th>ASN</Th><Th>Status</Th><Th className="text-right">Action</Th></tr>
+            <tr><Th>Reference</Th><Th>Source</Th><Th>Class</Th><Th>Branch</Th><Th>Product</Th><Th className="text-right">Exp. qty</Th><Th>Serial range</Th><Th>ASN</Th><Th>Status</Th><Th className="text-right">Action</Th></tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {list.map(er => {
@@ -302,6 +442,9 @@ export default function ReceiptAck({ expectedReceipts, setExpectedReceipts, addD
                 <tr key={er.id} className="hover:bg-slate-50">
                   <Td className="font-mono text-indigo-700">{ref}<div className="text-xs font-normal text-slate-400">{er.file || er.from || ""}</div></Td>
                   <Td><span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600"><Icon className="h-3.5 w-3.5" />{er.source === "VENDOR" ? "Vendor" : "Transfer"}</span></Td>
+                  <Td>{classOf(er) === "PERSONALISED"
+                    ? <><Badge tone="indigo">Personalised</Badge><div className="mt-0.5 text-[10px] text-slate-400">{er.pinConsignment ? `PIN ${er.pinConsignment.expectedMailers}` : "Green PIN"}</div></>
+                    : <Badge tone="slate">Pregen</Badge>}</Td>
                   <Td className="text-sm">{branchName(er.branch)}</Td>
                   <Td className="flex items-center gap-1.5 text-xs"><span className="h-2.5 w-2.5 rounded-sm" style={{ background: productColors[er.product] }} />{er.product}</Td>
                   <Td className="text-right font-mono font-semibold">{er.expectedQty.toLocaleString()}</Td>
@@ -312,6 +455,7 @@ export default function ReceiptAck({ expectedReceipts, setExpectedReceipts, addD
                     {er.status === "IN_TRANSIT" && <button onClick={() => setStage1(er)} className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-500">Receive</button>}
                     {["RECEIVED_PENDING_ACK", "PARTIALLY_ACCEPTED", "QUARANTINED"].includes(er.status) && <button onClick={() => setStage2(er)} className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-500">Verify →</button>}
                     {er.status === "IN_BRANCH_VAULT" && <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600"><CheckCircle2 className="h-3.5 w-3.5" />GRN done</span>}
+                    {er.status === "AWAITING_COLLECTION" && <span className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600"><CreditCard className="h-3.5 w-3.5" />→ Collection</span>}
                   </Td>
                 </tr>
               );
@@ -329,7 +473,9 @@ export default function ReceiptAck({ expectedReceipts, setExpectedReceipts, addD
               <div key={er.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 p-2.5">
                 <span className="font-mono text-indigo-700">{er.source === "VENDOR" ? `Job ${er.jobExecId}` : er.crNumber} · {branchName(er.branch)} · {er.product}</span>
                 <span className="text-slate-600">Stage-1 {er.stage1?.by} · Stage-2 {er.stage2?.by} / checker {er.stage2?.checker}</span>
-                <span className="font-mono">accepted <span className="font-semibold text-emerald-600">{er.stage2?.acceptedQty?.toLocaleString()}</span>{er.stage2?.quarantinedQty ? <> · quarantined <span className="font-semibold text-rose-600">{er.stage2.quarantinedQty}</span></> : null}</span>
+                <span className="font-mono">{classOf(er) === "PERSONALISED"
+                  ? <>→ collection <span className="font-semibold text-indigo-600">{(er.stage2?.toCollection ?? er.stage2?.acceptedQty)?.toLocaleString()}</span>{er.stage2?.reissues ? <> · reissues <span className="font-semibold text-rose-600">{er.stage2.reissues}</span></> : null}</>
+                  : <>accepted <span className="font-semibold text-emerald-600">{er.stage2?.acceptedQty?.toLocaleString()}</span>{er.stage2?.quarantinedQty ? <> · quarantined <span className="font-semibold text-rose-600">{er.stage2.quarantinedQty}</span></> : null}</>}</span>
               </div>
             ))}
           </div>
@@ -337,7 +483,9 @@ export default function ReceiptAck({ expectedReceipts, setExpectedReceipts, addD
       )}
 
       {stage1 && <Stage1Modal er={stage1} branchName={branchName(stage1.branch)} onClose={() => setStage1(null)} onConfirm={confirmStage1} />}
-      {stage2 && <Stage2Modal er={stage2} branchName={branchName(stage2.branch)} productName={productName} onClose={() => setStage2(null)} onAccept={acceptStage2} />}
+      {stage2 && (classOf(stage2) === "PERSONALISED"
+        ? <PersonalisedVerifyModal er={stage2} branchName={branchName(stage2.branch)} onClose={() => setStage2(null)} onAccept={acceptPersonalised} />
+        : <Stage2Modal er={stage2} branchName={branchName(stage2.branch)} productName={productName} onClose={() => setStage2(null)} onAccept={acceptStage2} />)}
     </div>
   );
 }

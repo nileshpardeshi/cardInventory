@@ -17,8 +17,10 @@ export const RECEIPT_STATUS = {
   RECEIVED_PENDING_ACK: { label: "Received · pending ack", tone: "amber", step: 2 },
   PARTIALLY_ACCEPTED:   { label: "Partially accepted",     tone: "amber", step: 3 },
   QUARANTINED:          { label: "Quarantined",            tone: "rose",  step: 3 },
-  IN_BRANCH_VAULT:      { label: "In branch vault",        tone: "green", step: 4 },
+  IN_BRANCH_VAULT:      { label: "In branch vault",        tone: "green", step: 4 }, // pregen terminal
+  AWAITING_COLLECTION:  { label: "Awaiting collection",    tone: "indigo", step: 4 }, // personalised terminal → Collection screen
 };
+export const TERMINAL_STATUS = ["IN_BRANCH_VAULT", "AWAITING_COLLECTION"];
 export const statusMeta = s => RECEIPT_STATUS[s] || { label: s, tone: "slate", step: 0 };
 
 /* ----------------------------- discrepancy reasons ----------------------------- */
@@ -36,6 +38,15 @@ export const DISCREPANCY_REASONS = [
   { code: "MISSING_PIN_MAILER", label: "Missing PIN mailer",        sev: "Medium" },
   { code: "LATE_DELIVERY",      label: "Late delivery",             sev: "Low"    },
   { code: "ASN_MISMATCH",       label: "ASN vs physical mismatch",  sev: "Medium" },
+  // ---- personalised-specific (Part L) ----
+  { code: "CARD_MISSING_NAMED", label: "Named card missing",        sev: "High"   },
+  { code: "WRONG_CUSTOMER",     label: "Wrong customer / mis-perso",sev: "High"   },
+  { code: "NAME_PAN_MISMATCH",  label: "Name ↔ PAN mismatch",       sev: "High"   },
+  { code: "DAMAGED_PERSONALISED", label: "Damaged personalised card", sev: "High" },
+  { code: "KYC_DATA_MISMATCH",  label: "KYC data mismatch",         sev: "High"   },
+  { code: "PIN_MAILER_MISMATCH",label: "PIN mailer mismatch",       sev: "Medium" },
+  { code: "CARD_PIN_TOGETHER",  label: "Card + PIN together (breach)", sev: "High" },
+  { code: "SR_CANCELLED_CARD_PRINTED", label: "SR cancelled, card printed", sev: "Medium" },
 ];
 export const reasonMeta = code => DISCREPANCY_REASONS.find(r => r.code === code) || { code, label: code, sev: "Medium" };
 export const reasonSlas = { High: "Same day", Medium: "2 business days", Low: "5 business days" };
@@ -51,8 +62,9 @@ export const officersFor = id => BRANCH_OFFICERS[id] || ["Custodian on record", 
 
 /* ----------------------------- embossing batch jobs (EOD) ----------------------------- */
 export const EMBOSSING_JOBS = [
-  { jobExecId: "3466", runDate: "26 Jun 2026", vendor: "SecurePrint Card Co.", split: "product + branch", files: ["EMF-2026-0461", "EMF-2026-0462", "EMF-2026-0463"] },
-  { jobExecId: "3460", runDate: "24 Jun 2026", vendor: "Indus Emboss Pvt Ltd",  split: "branch",          files: ["EMF-2026-0455"] },
+  { jobExecId: "3466", runDate: "26 Jun 2026", vendor: "SecurePrint Card Co.", split: "product + branch", files: ["EMF-2026-0461", "EMF-2026-0462", "EMF-2026-0463"], cardClass: "PREGEN" },
+  { jobExecId: "3460", runDate: "24 Jun 2026", vendor: "Indus Emboss Pvt Ltd",  split: "branch",          files: ["EMF-2026-0455"], cardClass: "PREGEN" },
+  { jobExecId: "3471", runDate: "26 Jun 2026", vendor: "SecurePrint Card Co.", split: "product + branch", files: ["EMF-2026-0480"], cardClass: "PERSONALISED" },
 ];
 
 /* ----------------------------- service requests (one approved card order) ----------------------------- */
@@ -112,6 +124,38 @@ export const INITIAL_EXPECTED_RECEIPTS = [
     status: "IN_BRANCH_VAULT",
     stage1: { by: "L. Menon", at: "25 Jun 2026 10:30", cartons: 1, declaredQty: 405, sealsIntact: true, challan: "DC-55012" },
     stage2: { by: "K. Iyer", checker: "T. Gowda", at: "25 Jun 2026 15:05", acceptedQty: 400, quarantinedQty: 5, blind: false },
+  },
+  // ---- personalised (Part L): in transit — walk the full card-by-card flow ----
+  {
+    id: "ER-3471-PUN01-PRS", source: "VENDOR", cardClass: "PERSONALISED", jobExecId: "3471", file: "EMF-2026-0480",
+    branch: "PUN01", product: "DEB-PRS", expectedQty: 8,
+    namedCards: [
+      { cardId: "CRD-2026-119101", pan: "XXXX XXXX XXXX 1234", customer: "A. Rao",    sr: "SR-700004501" },
+      { cardId: "CRD-2026-119102", pan: "XXXX XXXX XXXX 1190", customer: "M. Khan",   sr: "SR-700004502" },
+      { cardId: "CRD-2026-119103", pan: "XXXX XXXX XXXX 2231", customer: "S. Gupta",  sr: "SR-700004503" },
+      { cardId: "CRD-2026-119104", pan: "XXXX XXXX XXXX 3344", customer: "D. Patel",  sr: "SR-700004504" },
+      { cardId: "CRD-2026-119105", pan: "XXXX XXXX XXXX 4455", customer: "P. Nair",   sr: "SR-700004505" },
+      { cardId: "CRD-2026-119106", pan: "XXXX XXXX XXXX 5566", customer: "R. Shah",   sr: "SR-700004506" },
+      { cardId: "CRD-2026-119107", pan: "XXXX XXXX XXXX 6677", customer: "T. Verma",  sr: "SR-700004507" },
+      { cardId: "CRD-2026-119108", pan: "XXXX XXXX XXXX 7788", customer: "J. Pillai", sr: "SR-700004508" },
+    ],
+    pinConsignment: { id: "SHP-2026-0962-PIN", expectedMailers: 8, status: "IN_TRANSIT" },
+    asn: { shipment: "SHP-2026-0962", awb: "BLR-7785512", carton: "CTN-93", seal: "SEAL-93012", courier: "SecureLogistics", dispatched: "26 Jun 2026", eta: "27 Jun 2026" },
+    status: "IN_TRANSIT",
+  },
+  // ---- personalised (Part L): completed example → already in collection register ----
+  {
+    id: "ER-3470-MUM01-PRS", source: "VENDOR", cardClass: "PERSONALISED", jobExecId: "3470", file: "EMF-2026-0479",
+    branch: "MUM01", product: "DEB-PRS", expectedQty: 2,
+    namedCards: [
+      { cardId: "CRD-2026-119050", pan: "XXXX XXXX XXXX 9043", customer: "P. Deshmukh", sr: "SR-700004410" },
+      { cardId: "CRD-2026-119041", pan: "XXXX XXXX XXXX 8830", customer: "V. Reddy",    sr: "SR-700004411" },
+    ],
+    pinConsignment: { id: "SHP-2026-0958-PIN", expectedMailers: 2, status: "RECEIVED" },
+    asn: { shipment: "SHP-2026-0958", awb: "BLR-7779902", carton: "CTN-90", seal: "SEAL-90011", courier: "SecureLogistics", dispatched: "24 Jun 2026", eta: "25 Jun 2026" },
+    status: "AWAITING_COLLECTION",
+    stage1: { by: "A. Shah", at: "25 Jun 2026 10:10", cartons: 1, declaredQty: 2, sealsIntact: true, challan: "DC-90011" },
+    stage2: { by: "D. Mehta", checker: "N. Rao", at: "25 Jun 2026 14:40", acceptedQty: 2, toCollection: 2, reissues: 0, pinShort: 0, blind: false },
   },
 ];
 
@@ -187,4 +231,15 @@ export function matchesSearch(er, q) {
   const hay = [er.jobExecId, er.crNumber, er.id, er.file, er.asn?.shipment, er.asn?.awb, er.asn?.carton, er.asn?.seal]
     .filter(Boolean).join(" ").toLowerCase();
   return hay.includes(q.trim().toLowerCase());
+}
+
+/* cardClass of a receipt, defaulting to PREGEN */
+export const classOf = er => er.cardClass || "PREGEN";
+
+/* Deterministic reissue SR id for a missing/damaged/wrong named card (Part L). */
+export function reissueSrFor(originalSr, n = 0) {
+  const m = String(originalSr).match(/(\d+)$/);
+  if (!m) return `${originalSr}-RE${n + 1}`;
+  const num = parseInt(m[1], 10) + 100 + n;
+  return originalSr.slice(0, m.index) + num;
 }

@@ -4,7 +4,7 @@ import {
   RefreshCw, AlertTriangle, Route, Settings2, Search, ChevronRight, CheckCircle2,
   Clock, Truck, Factory, Building2, UserCheck, User, CreditCard,
   ShieldCheck, Scan, Landmark, CircleDot, Lock, BarChart3, ClipboardCheck,
-  Hourglass, FileSignature, Trash2, TrendingUp, CalendarClock, Inbox, FileWarning
+  Hourglass, FileSignature, Trash2, TrendingUp, CalendarClock, Inbox, FileWarning, Send
 } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid,
@@ -18,6 +18,8 @@ import { SEV, Badge, Card, SectionTitle, Kpi, Th, Td } from "./components/ui";
 import ReceiptAck from "./components/ReceiptAck";
 import Discrepancies from "./components/Discrepancies";
 import { INITIAL_EXPECTED_RECEIPTS, INITIAL_DISCREPANCIES } from "./lib/receipts";
+import BranchTransferOrder from "./components/BranchTransferOrder";
+import { INITIAL_TRANSFER_ORDERS, BRANCH_LOTS } from "./lib/transfers";
 
 function trendBadge(t) {
   if (t >= 2) return { sym: "▲", tone: "text-emerald-600", word: "Rising" };
@@ -1980,6 +1982,7 @@ const NAV = [
   { id: "grn", label: "Receive (GRN)", icon: PackageCheck },
   { id: "receiptack", label: "Receipt & Ack", icon: Inbox },
   { id: "transfers", label: "Transfers", icon: ArrowLeftRight },
+  { id: "bto", label: "Branch Transfer Order", icon: Send },
   { id: "intransit", label: "In-transit tracking", icon: Truck },
   { id: "custodian", label: "Custodian day book", icon: Vault },
   { id: "collection", label: "Card collection", icon: CreditCard },
@@ -2004,6 +2007,8 @@ export default function CardInventoryDemo() {
   const [collection, setCollection] = useState(INITIAL_COLLECTION);
   const [expectedReceipts, setExpectedReceipts] = useState(INITIAL_EXPECTED_RECEIPTS);
   const [discrepancies, setDiscrepancies] = useState(INITIAL_DISCREPANCIES);
+  const [transferOrders, setTransferOrders] = useState(INITIAL_TRANSFER_ORDERS);
+  const [branchLots, setBranchLots] = useState(BRANCH_LOTS);
   const [dayClosed, setDayClosed] = useState(false);
   const [toastMsg, setToastMsg] = useState(null);
 
@@ -2017,6 +2022,7 @@ export default function CardInventoryDemo() {
   const shipOverdue = shipments.filter(s => s.overdue).length;
   const receiptOpen = expectedReceipts.filter(er => er.status !== "IN_BRANCH_VAULT").length;
   const discActive = discrepancies.filter(d => d.status !== "Closed" && d.status !== "Resolved").length;
+  const btoOpen = transferOrders.filter(t => ["NEW", "APPROVED", "ALLOCATED", "PARTIALLY_FULFILLED"].includes(t.status)).length;
 
   return (
     <div className="flex min-h-screen bg-slate-100 text-slate-900" style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" }}>
@@ -2042,6 +2048,7 @@ export default function CardInventoryDemo() {
               {n.id === "exceptions" && <span className="rounded-full bg-rose-500 px-1.5 text-xs font-semibold text-white">{exceptions.filter(e => e.sev === "High").length}</span>}
               {n.id === "receiptack" && receiptOpen > 0 && <span className="rounded-full bg-amber-400 px-1.5 text-xs font-semibold text-slate-900">{receiptOpen}</span>}
               {n.id === "discrepancies" && discActive > 0 && <span className="rounded-full bg-rose-500 px-1.5 text-xs font-semibold text-white">{discActive}</span>}
+              {n.id === "bto" && btoOpen > 0 && <span className="rounded-full bg-amber-400 px-1.5 text-xs font-semibold text-slate-900">{btoOpen}</span>}
             </button>
           ))}
         </nav>
@@ -2076,8 +2083,9 @@ export default function CardInventoryDemo() {
           {view === "branchstats" && <BranchStats sel={branchSel} setSel={setBranchSel} exceptions={exceptions} transfers={transfers} collection={collection} setView={setView} />}
           {view === "orders" && <Orders />}
           {view === "grn" && <Receiving grns={grns} setGrns={setGrns} addException={addException} toast={toast} setCollection={setCollection} />}
-          {view === "receiptack" && <ReceiptAck expectedReceipts={expectedReceipts} setExpectedReceipts={setExpectedReceipts} discrepancies={discrepancies} addDiscrepancy={addDiscrepancy} addException={addException} toast={toast} branches={BRANCHES} products={PRODUCTS} productColors={PRODUCT_COLORS} />}
+          {view === "receiptack" && <ReceiptAck expectedReceipts={expectedReceipts} setExpectedReceipts={setExpectedReceipts} addDiscrepancy={addDiscrepancy} addException={addException} toast={toast} setCollection={setCollection} branches={BRANCHES} products={PRODUCTS} productColors={PRODUCT_COLORS} />}
           {view === "transfers" && <Transfers transfers={transfers} setTransfers={setTransfers} toast={toast} />}
+          {view === "bto" && <BranchTransferOrder transferOrders={transferOrders} setTransferOrders={setTransferOrders} branchLots={branchLots} setBranchLots={setBranchLots} setExpectedReceipts={setExpectedReceipts} toast={toast} goReceive={() => setView("receiptack")} branches={BRANCHES} products={PRODUCTS} />}
           {view === "intransit" && <InTransit shipments={shipments} toast={toast} />}
           {view === "custodian" && <Custodian ops={ops} setOps={setOps} pool={pool} setPool={setPool} dayClosed={dayClosed} setDayClosed={setDayClosed} toast={toast} addException={addException} />}
           {view === "collection" && <Collection records={collection} setRecords={setCollection} toast={toast} addException={addException} />}

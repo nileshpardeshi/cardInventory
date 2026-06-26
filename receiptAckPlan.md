@@ -3,11 +3,11 @@
 | | |
 |---|---|
 | **Document** | Receipt & Acknowledgement (Card Order GRN) — UX & Functional Design Plan |
-| **Status** | **APPROVED — IN BUILD** (pregen scope; personalised deferred) |
-| **Version** | 0.2 |
+| **Status** | **Pregen + personalised built; Branch Transfer Order design added (Part M) — FOR REVIEW** |
+| **Version** | 0.4 |
 | **Date** | 27 June 2026 |
-| **Module** | Card Inventory Management (CIM) → *Receipt & Acknowledgement* |
-| **Relates to** | `cardInventoryRequirement.md` §5 (identifier hierarchy), §6 (state model), §8.4 (GRN), §10 (PIN mailer), §11 Flows A / H / K |
+| **Module** | Card Inventory Management (CIM) → *Receipt & Acknowledgement* + *Branch Transfer Order* |
+| **Relates to** | `cardInventoryRequirement.md` §5 (identifier hierarchy), §6 (state model), §8.4 (GRN), §8.5 (branch transfers), §9 (pregen vs personalised), §10 (PIN mailer), §11 Flows A / F / H / K |
 | **Author** | Product / Eng (drafted with Claude) |
 
 > This plan answers every question raised in the brief, designs the end-to-end UX (with submenus, two-stage flow, and a discrepancy register), gives realistic dummy data and flow diagrams, lists edge cases, and ends with **improvements & suggestions / my comments**. Please review before implementation.
@@ -27,8 +27,10 @@
 10. Part I — Status / state machine
 11. Part J — Implementation plan (phased)
 12. Part K — Alignment with the requirements doc
-13. Improvements, suggestions & my comments
-14. Glossary (key terms)
+13. Part L — Personalised card acknowledgement (same menu, card-by-card)
+14. Part M — Branch Transfer Order (request → allocate → dispatch)
+15. Improvements, suggestions & my comments
+16. Glossary (key terms)
 
 ---
 
@@ -557,7 +559,405 @@ Aligns with `cardInventoryRequirement.md` §6 (`RECEIVED_PENDING_ACK` → `AT_BR
 
 ---
 
-## 13. Improvements, suggestions & my comments
+## 13. Part L — Personalised card acknowledgement (same menu, card-by-card)
+
+> **Scope add (v0.3).** Personalised cards now share the **same Receipt & Acknowledgement menu**, Expected-Receipt model, tiered search (Job + Branch), two-stage flow, and discrepancy register as pregen. This Part specifies only what *differs*. It grounds in `cardInventoryRequirement.md` §9 (pregen vs personalised), §10 (PIN mailer), and §11 Flow F (collection last-mile).
+
+### L.0 Playback — personalised is procedurally identical up to dispatch
+
+```mermaid
+flowchart LR
+  A["Bank user raises PERSONALISED requests<br/>(named customer) · unique SR each · e.g. 500/day"] --> B{Approved?}
+  B -- yes --> C["EOD issuance job<br/>Job Exec ID = 3471<br/>tags all 500 approved SRs"]
+  C --> D["Perso/embossing files (split product/branch/both)<br/>header • body • footer · PGP · Job 3471 in header<br/>body = NAMED records (PAN, name, expiry)"]
+  C --> E[("Expected Receipts auto-created<br/>cardClass = PERSONALISED<br/>+ a NAMED-CARD manifest per SR")]
+  D --> F["Vendor personalises NAMED plastic<br/>(pairs each card to its cardholder)"]
+  F --> G["Pack by destination branch + seals · CARDS consignment"]
+  F --> P["Generate PIN mailers (HSM) · SEPARATE consignment"]
+  G --> H["Dispatch CARDS (secure courier) + challan/ASN"]
+  P --> H2["Dispatch PIN MAILERS separately<br/>(different envelope / courier / timing)"]
+  H --> I["Stage-1 gate receipt (CARDS)"]
+  H2 --> I2["Stage-1 gate receipt (PIN MAILERS) — own row"]
+  I --> J["Stage-2 CARD-BY-CARD verify (dual custody)<br/>tick each named card vs manifest<br/>+ reconcile cards : PIN mailers"]
+  J -->|clean| K["AWAITING_COLLECTION (named register)<br/>→ feeds Collection screen / Flow F"]
+  J -->|missing/damaged/wrong| L2["Discrepancy + REISSUE SR<br/>(cannot substitute a named card)"]
+```
+
+### L.1 What's the same vs what differs
+
+| Aspect | Pregen (built) | **Personalised (this Part)** |
+|---|---|---|
+| SR → Job → embossing split | same | **same** |
+| Menu, worklist, Job+Branch search | same | **same** (a `cardClass` flag distinguishes) |
+| Stage-1 gate receipt | same | **same** — plus a **separate PIN-mailer consignment** row |
+| Stage-2 verification grain | per-SR **range + count** | **card-by-card** — tick every **named** card (PAN / cardID / customer) vs manifest |
+| Shortfall handling | accept matched, quarantine rest (fungible) | **no substitution** — a missing/damaged named card forces a **reissue SR** for that customer |
+| Accepted into | `IN_BRANCH_VAULT` (issuable pool) | **`AWAITING_COLLECTION`** (named register → Collection screen); not general issuance |
+| PIN | inside kit, inactive | **separate consignment**, separately reconciled (or **Green PIN** = none) |
+| Replenishment / forecast | yes | **no** (never reorder a customer's card) |
+| Discrepancy register | shared | **shared** + personalised-specific reasons |
+
+### L.2 Two-stage flow for personalised (sequence)
+
+```mermaid
+sequenceDiagram
+  actor V as Vendor
+  actor R as Receiving officer (Stage 1)
+  actor C as Custodian + Checker (Stage 2)
+  participant S as CMS / CIM
+  V->>R: Deliver CARDS carton + challan (Job 3471); SEPARATELY the PIN-mailer consignment
+  R->>S: Search Job 3471 + Branch → personalised Expected Receipt (+ PIN companion)
+  R->>S: Gate-receive CARDS (cartons, seals, declared count)
+  R->>S: Gate-receive PIN MAILERS (separate row, separate custody)
+  S-->>R: both → RECEIVED_PENDING_ACK
+  Note over C: dual custody · SoD (≠ Stage-1)
+  C->>S: Card-by-card — tick each named card present / mark missing|damaged|wrong-customer
+  C->>S: Reconcile cards count : PIN-mailer count
+  alt every named card present & paired
+    C->>S: Accept → AWAITING_COLLECTION (named register)
+    S-->>C: cards enter Collection lifecycle (aging clock starts)
+  else some named card missing / damaged / wrong
+    C->>S: Raise discrepancy per card + auto-raise REISSUE SR for that customer
+    S-->>C: present cards → AWAITING_COLLECTION; problem cards → Quarantine / Reissue
+  end
+```
+
+### L.3 PIN mailer — parallel, separate-custody reconciliation
+
+Real-world standard: the **card carrier and PIN mailer are posted as two separate consignments** so intercepting one is useless — increasingly replaced by **Green PIN** (ATM / IVR / app), in which case there is **no mailer stream**.
+
+```mermaid
+flowchart LR
+  CC["CARDS consignment → Stage-1 → card-by-card verify"] --> RC{"Reconcile<br/>N cards : N mailers"}
+  PP["PIN-MAILER consignment → Stage-1 → count"] --> RC
+  RC -->|match| OK["Both held in SEPARATE custody until handover"]
+  RC -->|mismatch| D["Discrepancy: MISSING_PIN_MAILER / PIN_MAILER_MISMATCH"]
+  GP[["Green-PIN product"]] -. "no mailer stream" .-> CC
+```
+
+Rules: never co-locate card + PIN before customer handover (raise **CARD_PIN_TOGETHER** if a consignment violates this); green-PIN products skip the mailer entirely; the PIN mailer **never gates** the card's entry to `AWAITING_COLLECTION` — it gates *handover*, which lives in the Collection screen.
+
+### L.4 Wireframe — Stage-2 personalised card-by-card verification
+
+```
+┌ Stage 2 · Personalised verification (dual custody) — Job 3471 · Pune Camp ──────┐
+│ Custodian: P. Deshmukh   Checker: B. Patil   [☐ Blind]   Cards 180 · Mailers 180│
+│ Quick: [✓ Mark all present]   then flag exceptions ↓                            │
+│ ┌────────────────────────────────────────────────────────────────────────────┐│
+│ │ Card ID         Masked PAN          Customer    SR             Status        ││
+│ │ CRD-2026-119004 ****-****-****-1234 A. Rao      SR-700004501   (•) Present   ││
+│ │ CRD-2026-119005 ****-****-****-1190 M. Khan     SR-700004502   ( ) Missing ▼ ││
+│ │ CRD-2026-119006 ****-****-****-2231 S. Gupta    SR-700004503   ( ) Damaged ▼ ││
+│ │ … 177 more …                                                                 ││
+│ └────────────────────────────────────────────────────────────────────────────┘│
+│ PIN mailers: expected 180 · received [ 179 ]  Δ −1 → MISSING_PIN_MAILER         │
+│ Present → collection: 178   Reissue: 2   PIN short: 1                           │
+│      [ Save draft ]     [ Raise discrepancies + reissue ]    [ Accept present ] │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### L.5 Outcome & linkage to the Collection register
+
+Accepted named cards **do not enter the issuable vault**. Each becomes a `CollectionRecord` in `AWAITING_COLLECTION` (the app's existing **Card collection** screen / Flow F): aging clock starts, reminders at 15/30/45 days, KYC handover → `COLLECTED`, or unclaimed > 60 days → blocked → destroyed. R&A hands off; Collection owns the last mile.
+
+```mermaid
+flowchart LR
+  A[Stage-2 accept] --> B[("CollectionRecord<br/>AWAITING_COLLECTION")]
+  B --> C[Collection screen · reminders 15/30/45d]
+  C --> D["COLLECTED — KYC handover; PIN released separately"]
+  C --> E["Unclaimed > 60d → blocked → PENDING_DESTRUCTION → DESTROYED"]
+```
+
+### L.6 Personalised-specific discrepancy reasons (extend the shared register)
+
+`CARD_MISSING_NAMED` (a specific customer's card absent → reissue) · `WRONG_CUSTOMER` / `NAME_PAN_MISMATCH` (card personalised wrong → reissue) · `DAMAGED_PERSONALISED` (→ reissue; no substitution) · `KYC_DATA_MISMATCH` · `MISSING_PIN_MAILER` · `PIN_MAILER_MISMATCH` · `CARD_PIN_TOGETHER` (control breach) · `SR_CANCELLED_CARD_PRINTED` (account closed before receipt → divert to destruction). Every missing / damaged / wrong named card **auto-raises a reissue SR** (a fresh request to issuance), linked to both the discrepancy and the original SR.
+
+### L.7 Edge cases (personalised-specific)
+
+| # | Edge case | Handling |
+|---|---|---|
+| 1 | A named customer's card missing | `CARD_MISSING_NAMED` → reissue SR; the rest proceed to collection |
+| 2 | Card personalised for wrong customer / name ≠ PAN | `WRONG_CUSTOMER` / `NAME_PAN_MISMATCH` → quarantine + reissue; never hand over |
+| 3 | Damaged named card | `DAMAGED_PERSONALISED` → reissue (cannot substitute from a pool) |
+| 4 | PIN mailer late / never arrives | Cards still → `AWAITING_COLLECTION`; `MISSING_PIN_MAILER`; **handover blocked** until PIN resolved (or Green PIN) |
+| 5 | Card + PIN in the same consignment | `CARD_PIN_TOGETHER` control breach → escalate, segregate immediately |
+| 6 | Orphan PIN mailer (no matching card) or orphan card | flagged in both directions during reconciliation |
+| 7 | Customer relocated branch before receipt | accept, then **transfer** the `AWAITING_COLLECTION` card to the new home branch (CR) |
+| 8 | SR cancelled / account closed but card already printed | `SR_CANCELLED_CARD_PRINTED` → receive, divert straight to destruction (unclaimed path) |
+| 9 | Green-PIN product | no PIN stream; reconciliation skips mailers |
+| 10 | Split delivery of a 500-card job | partial card-by-card accept; remaining named cards stay open against the same Expected Receipt |
+| 11 | Excess named card not on the manifest | investigate (likely wrong branch) — never auto-accept a name you didn't expect |
+
+### L.8 State-machine delta (personalised tail)
+
+```mermaid
+stateDiagram-v2
+  IN_TRANSIT --> RECEIVED_PENDING_ACK: Stage-1 (cards) + (PIN mailers)
+  RECEIVED_PENDING_ACK --> AWAITING_COLLECTION: all named cards present & paired
+  RECEIVED_PENDING_ACK --> PARTIALLY_ACCEPTED: some named cards missing / damaged
+  RECEIVED_PENDING_ACK --> QUARANTINED: wrong-customer / control breach
+  PARTIALLY_ACCEPTED --> REISSUE_RAISED: reissue SR per missing / damaged card
+  AWAITING_COLLECTION --> COLLECTED: KYC handover (Collection)
+  AWAITING_COLLECTION --> PENDING_DESTRUCTION: unclaimed > retention
+```
+
+(Pregen ends at `IN_BRANCH_VAULT`; personalised ends at `AWAITING_COLLECTION` → Collection lifecycle.)
+
+### L.9 UX integration — same menu, one discriminator
+
+- **`cardClass` on the Expected Receipt** (`PREGEN` | `PERSONALISED`), derived from product `cls` (`DEB-PRS` etc. = Personalised).
+- **Worklist:** add a **Class** column + filter (All / Pregen / Personalised); personalised rows badged; the **PIN-mailer companion** shows as a linked row.
+- **Stage-1:** identical; the PIN-mailer consignment is a separate receipt row.
+- **Stage-2:** the component **branches on `cardClass`** — pregen → the count grid (built); personalised → the **card-by-card panel** (L.4) + PIN reconcile strip.
+- **Accept:** pregen → vault; personalised → **create CollectionRecords** (`AWAITING_COLLECTION`) and, for exceptions, **reissue SRs**.
+- Everything else — search, discrepancy register, statuses, SoD, blind-count, badges — is **reused unchanged**.
+
+### L.10 Dummy data to add (deterministic, in-memory)
+
+```text
+EMBOSSING_JOBS += { jobExecId:"3471", runDate:"26 Jun 2026", vendor:"SecurePrint Card Co.",
+                    split:"product+branch", files:["EMF-2026-0480"], cardClass:"PERSONALISED" }
+
+SERVICE_REQUESTS += (personalised — one per named customer)
+  { sr:"SR-700004501", branch:"PUN01", product:"DEB-PRS", qty:1, jobExecId:"3471",
+    file:"EMF-2026-0480", customer:"A. Rao",  cardId:"CRD-2026-119004", pan:"****-****-****-1234" }
+  { sr:"SR-700004502", …, customer:"M. Khan", cardId:"CRD-2026-119005", pan:"****-****-****-1190" }
+  … 180 named SRs for Pune Camp …
+
+EXPECTED_RECEIPTS +=
+  { id:"ER-3471-PUN01-PRS", source:"VENDOR", cardClass:"PERSONALISED", jobExecId:"3471",
+    file:"EMF-2026-0480", branch:"PUN01", product:"DEB-PRS", expectedQty:180,
+    namedCards:[ {cardId, pan, customer, sr}, … 180 … ],
+    pinConsignment:{ id:"SHP-2026-0962-PIN", expectedMailers:180, status:"IN_TRANSIT" },
+    asn:{ shipment:"SHP-2026-0962", awb:"BLR-7785512", carton:"CTN-93", seal:"SEAL-93", … },
+    status:"IN_TRANSIT" }
+
+INITIAL_DISCREPANCIES +=
+  { discId:"DISC-2026-0008", source:"VENDOR", cardClass:"PERSONALISED", ref:"3471",
+    branch:"PUN01", product:"DEB-PRS", sr:"SR-700004502", lot:"CRD-2026-119005",
+    reason:"CARD_MISSING_NAMED", expected:1, received:0, variance:-1, sev:"High",
+    status:"Open", owner:"Custodian", reissueSr:"SR-700004599", linkedException:"EXC-2026-4473",
+    note:"Named card for M. Khan absent → reissue SR-700004599 raised." }
+```
+
+> **Worked example.** Job `3471` → Pune Camp: **180 named DEB-PRS cards + 180 PIN mailers** (separate consignment). Stage-2 card-by-card: **178 present**, M. Khan's card **missing** (→ reissue `SR-700004599`), S. Gupta's card **damaged** (→ reissue); **PIN mailers 179 vs 180** (−1, `MISSING_PIN_MAILER`). Result: **178 clean cards → `AWAITING_COLLECTION`** (Collection screen, aging starts); **2 reissue SRs** raised; **1 PIN short** logged. The Job 3471 line stays **open** for the 2 reissues.
+
+### L.11 Build phase (after your review)
+
+Extends the **same** `ReceiptAck` (no new nav): add `cardClass` + `namedCards` + `pinConsignment` to `src/lib/receipts.js`; add a `PersonalisedVerify` panel in `ReceiptAck.jsx` that the Stage-2 modal renders when `cardClass === "PERSONALISED"`; on accept, push `CollectionRecord`s (reuse the app's `setCollection`) and raise reissue SRs; add the personalised reasons to the discrepancy register. Personalised stays **out of replenishment/forecast**.
+
+---
+
+## 14. Part M — Branch Transfer Order (request → allocate → dispatch)
+
+> **Scope.** This Part designs the **outbound** half of inter-branch transfer — *raise a request, approve, allocate stock from lots, approve dispatch, and ship*. The **inbound** half (receipt by **CR number**) is already built (Part E + the Receipt & Acknowledgement screen). Together they are the **two ends of one CR**. Grounded in the standard **3-leg inter-branch transfer** (Requisition → IBT-Out → IBT-In) and the **two-step stock-transport-order** (reserve → goods-issue / in-transit → goods-receipt). Relates to `cardInventoryRequirement.md` §8.5 and §11 Flow K.
+
+### M.0 Playback — two modes, two request types
+
+- **Mode 1 — HQ / Central / Card-Center → branches** (one source serves many).
+- **Mode 2 — Branch ↔ branch** (any branch holding stock can fulfil another's request).
+- **Request types:**
+  - **Request Cards** *(pull — branch-initiated)*: a branch asks for stock; a fulfiller allocates and ships.
+  - **Transfer Cards** *(push — HQ/source-initiated)*: HQ/Central decides to send stock directly to a branch.
+
+Both produce a **CR (Change Request)** that flows the **same** lifecycle and is received via Receipt & Acknowledgement.
+
+```mermaid
+flowchart LR
+  subgraph PULL["Request Cards (pull) — branch-initiated"]
+    A1["Pune Camp needs 500 Visa Platinum<br/>raises Request Cards"] --> A2["Maker-checker at requester<br/>NEW → APPROVED (branch head)"]
+    A2 --> A3["Routed to fulfiller (Delhi / HQ)"]
+  end
+  subgraph PUSH["Transfer Cards (push) — HQ-initiated"]
+    B1["HQ / Central decides to send stock<br/>creates Transfer Cards"] --> B2["Maker-checker at source<br/>NEW → APPROVED"]
+  end
+  A3 --> C["Fulfiller ALLOCATES from lots<br/>(FIFO, multi-lot) → RESERVED"]
+  B2 --> C
+  C --> D["Checker approves dispatch (dual custody)<br/>→ goods-issue"]
+  D --> E["IN_BRANCH_TRANSFER (stock IN_TRANSIT)<br/>+ shipment details keyed by the branch"]
+  E --> F["Receipt &amp; Ack at destination (by CR)<br/>RECEIVED_PENDING_ACK → IN_BRANCH_VAULT"]
+```
+
+### M.1 The 3 legs (how it maps to our model)
+
+| Leg | Who | What | Screen |
+|---|---|---|---|
+| **Requisition** | requesting branch | *Request Cards* (NEW → APPROVED) | **Branch Transfer Order** (new) |
+| **IBT-Out** | fulfilling branch / HQ | allocate from lots + approve + dispatch | **Branch Transfer Order** (new) |
+| **IBT-In** | receiving branch | gate + card/lot verify | **Receipt & Acknowledgement** (built) |
+
+### M.2 Your questions, answered
+
+**Q1 — Do we need an approver at the fulfilment side too?** **Yes — maker-checker at *both* ends, plus dual custody on the vault-out.**
+- *Requester side:* maker raises the request → branch head (checker) approves. `NEW → APPROVED`. ✅ (as you described)
+- *Fulfiller side:* a vault officer (maker) **allocates** the lots → a **second officer / branch head (checker) approves the dispatch** under **dual custody**. Dispatching stock *out* of a vault is a high-value, irreversible movement — a second pair of eyes must verify the pick (right serials, right qty) before goods-issue. This prevents wrong/over-allocation and fraud, and matches PCI Card Production dual-custody for outward movements.
+
+**Q2 — Do branches update shipment details? How?** **Yes — and always.** Unlike the embossing vendor (external, capability varies), the dispatching **branch is an internal CMS user**, so it keys the shipment details **directly in the Transfer Order → Dispatch screen**: courier, AWB, carton/seal, dispatch date, ETA, and the allocated **serial ranges**. This is the *internal equivalent of the vendor ASN* — but it's **always present** (no API/portal needed). That's exactly why transfer receipts are richer and easier than vendor receipts (Part E).
+
+**Q3 — Do I need to change the card status from "In Transit"?** Think in **two layers** — they're two views of the same fact, and you should keep them aligned:
+
+| Layer | States |
+|---|---|
+| **Transfer-order (CR) document** | `NEW → APPROVED → ALLOCATED → READY_FOR_DISPATCH → IN_BRANCH_TRANSFER → RECEIVED_PENDING_ACK → IN_BRANCH_VAULT` |
+| **Stock unit (the physical cards)** | `IN_VAULT → RESERVED → IN_TRANSIT → RECEIVED_PENDING_ACK → IN_BRANCH_VAULT` |
+
+So: you **don't need a third card state** — `IN_BRANCH_TRANSFER` (document) corresponds to the stock units being `IN_TRANSIT`. What you **do** need to add is **`RESERVED` at allocation** and a **source decrement at dispatch** (goods-issue): once dispatched, the cards leave the fulfiller's *available* balance and exist only as in-transit until the destination's GRN re-creates them. That conservation is the missing piece in the current flow.
+
+**Q4 — Current flow & improvements:** see M.4.
+
+### M.3 Allocation from lots — the new core UX
+
+The fulfiller opens an approved request and **searches its own stock by product**; the system lists **available lots** (each lot = **Job ID + SR + serial range + on-hand qty**, FIFO-ordered by receipt date). The user allocates **across one or more lots** until the requested quantity is met (FIFO suggested, override logged). The allocation produces the CR's **serial ranges** and **reserves** them.
+
+```
+┌ Allocate — CR-2026-0501 · 500 Visa Platinum → Pune Camp ───────────────────────┐
+│ Fulfiller: Delhi Connaught Pl.   Requested: 500   Allocated: 500   Short: 0     │
+│ FIFO suggestion: ON ✓   (manual override is logged)                             │
+│ ┌────────────────────────────────────────────────────────────────────────────┐│
+│ │ Lot    Job ID  SR            Serial range       Recd    Avail   Allocate     ││
+│ │ Lot A  3201    SR-560011001  KIT-90001–90250    02 May   250    [ 250 ]      ││
+│ │ Lot B  3266    SR-560022040  KIT-91000–91399    20 May   400    [ 250 ]      ││
+│ │ Lot C  3299    SR-560033075  KIT-92000–92099    05 Jun   100    [   0 ]      ││
+│ └────────────────────────────────────────────────────────────────────────────┘│
+│ Allocated ranges: KIT-90001–90250 (250)  +  KIT-91000–91249 (250)               │
+│        [ Cancel ]              [ Reserve & send for dispatch approval → ]        │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### M.4 Improved lifecycle (vs your current flow)
+
+**Your current flow:** `IN_CENTRAL_VAULT → IN_BRANCH_TRANSFER → RECEIVED_PENDING_ACK → IN_BRANCH_VAULT`
+
+**Improvements (what to add and why):**
+
+| Improvement | Why |
+|---|---|
+| Insert **NEW → APPROVED → ALLOCATED → READY_FOR_DISPATCH** before `IN_BRANCH_TRANSFER` | The current flow jumps straight to "in transfer" and hides the request, approval, allocation and dispatch-approval steps — the controls live there |
+| Add a **`RESERVED`** stock state at allocation | Stops the same serials being allocated to two CRs or issued at source while a transfer is pending (the key fix) |
+| **Decrement source at goods-issue** (dispatch) | Conservation of serials — only the destination GRN re-creates the stock (two-step STO) |
+| Add **`REJECTED` / `CANCELLED` / `PARTIALLY_FULFILLED` / `PARTIALLY_ACCEPTED`** branches | Real transfers get rejected, recalled, partially allocated (short stock) or partially received |
+| **Two-sided reconciliation** + in-transit-overdue escalation | "Dispatched but never received" must be caught (reuses the In-transit screen) |
+
+```mermaid
+stateDiagram-v2
+  [*] --> NEW: request / transfer raised
+  NEW --> APPROVED: requester/source checker
+  NEW --> REJECTED: not approved
+  APPROVED --> ALLOCATED: fulfiller picks lots (maker)
+  APPROVED --> CANCELLED: recalled
+  ALLOCATED --> READY_FOR_DISPATCH: fulfiller checker (dual custody)
+  ALLOCATED --> APPROVED: allocation rejected → release reservation
+  READY_FOR_DISPATCH --> IN_BRANCH_TRANSFER: goods-issue (dispatched, source −qty)
+  IN_BRANCH_TRANSFER --> RECEIVED_PENDING_ACK: gate receipt (Receipt & Ack)
+  RECEIVED_PENDING_ACK --> IN_BRANCH_VAULT: verified & accepted
+  RECEIVED_PENDING_ACK --> PARTIALLY_ACCEPTED: short / variance
+  IN_BRANCH_VAULT --> [*]
+```
+
+Stock-unit layer (conservation):
+
+```mermaid
+stateDiagram-v2
+  IN_VAULT --> RESERVED: allocated to a CR
+  RESERVED --> IN_TRANSIT: goods-issue (leaves source available balance)
+  RESERVED --> IN_VAULT: allocation cancelled
+  IN_TRANSIT --> RECEIVED_PENDING_ACK: gate receipt at destination
+  RECEIVED_PENDING_ACK --> IN_BRANCH_VAULT: accepted
+```
+
+### M.5 End-to-end (pull example — Pune requests 500 from Delhi)
+
+```mermaid
+sequenceDiagram
+  actor RM as Pune maker
+  actor RC as Pune branch head (checker)
+  actor FM as Delhi vault officer (allocator)
+  actor FC as Delhi checker (dual custody)
+  participant S as CMS / CIM
+  participant RA as Receipt & Ack (Pune)
+  RM->>S: Raise Request Cards CR-2026-0501 (500 Visa Platinum)
+  S-->>RM: status NEW
+  RC->>S: Approve → APPROVED; routed to Delhi
+  FM->>S: Search Delhi stock by product → lots (Job / SR / range / avail)
+  FM->>S: Allocate 250 (Lot A) + 250 (Lot B) → RESERVED
+  S-->>FM: status ALLOCATED
+  FC->>S: Approve dispatch (dual custody) → READY_FOR_DISPATCH
+  FC->>S: Goods-issue + key shipment (AWB / carton / seal / ETA)
+  S-->>FC: IN_BRANCH_TRANSFER · stock IN_TRANSIT · Delhi available −500
+  Note over RA: CR-2026-0501 now appears in Pune's inbound worklist
+  RA->>S: Receive (Stage-1) + Verify (Stage-2) by CR
+  S-->>RA: IN_BRANCH_VAULT · Pune available +500
+```
+
+### M.6 Wireframe — Branch Transfer Order worklist
+
+```
+┌ Branch Transfer Order ──────────────────────────────────────────────────────────┐
+│ [ My requests ] [ To fulfil ] [ Dispatched / in transit ]      [ + New request ] │
+│ Type: (•)All ( )Request cards ( )Transfer cards    Branch:[All ▼]                │
+│ ┌──────────────────────────────────────────────────────────────────────────────┐│
+│ │ CR            Type      From→To           Product     Qty  Status      Action  ││
+│ │ CR-2026-0501  Request   Delhi→Pune Camp   Visa Plat   500  Approved    [Allocate]│
+│ │ CR-2026-0498  Transfer  Vault→Bengaluru   DEB-CLS     300  Allocated   [Dispatch]│
+│ │ CR-2026-0312  Transfer  Vault→Pune Hinj.  DEB-CLS     300  In transfer [Track]   │
+│ └──────────────────────────────────────────────────────────────────────────────┘│
+│  action by status: Approved→[Allocate] · Allocated→[Approve & Dispatch] ·         │
+│                    In transfer→[Track] (receive happens in Receipt & Ack)         │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### M.7 Edge cases
+
+| # | Edge case | Handling |
+|---|---|---|
+| 1 | **Insufficient stock** (available < requested) | Partial allocation + **backorder** for the shortfall, or reject with reason |
+| 2 | **Allocation spans lots** | Multi-lot pick; preserve per-lot provenance (Job/SR) on each allocated range |
+| 3 | **Reserved stock** | Cannot be allocated to another CR or issued at source |
+| 4 | **Cancel / recall before dispatch** | Release the reservation back to `IN_VAULT` |
+| 5 | **FIFO override** | Allowed but **logged with reason** (e.g., near-expiry lot prioritised) |
+| 6 | **Wrong / unavailable product** | Can't fulfil — request rejected or routed to another fulfiller |
+| 7 | **In-transit overdue** | Escalation exception (reuses In-transit screen); two-sided reconciliation |
+| 8 | **Partial receipt at destination** | Handled by Receipt & Ack (short → discrepancy, CR line stays open) |
+| 9 | **Branch ↔ branch (non-HQ)** | Same flow; the fulfiller is a peer branch instead of HQ |
+| 10 | **Maker = checker** at either end | System-blocked (SoD) |
+| 11 | **Transfer Cards (push)** | Skips the requisition leg — source raises `NEW` directly to a destination |
+
+### M.8 Data model & dummy data (deterministic, in-memory)
+
+```text
+TRANSFER_ORDERS (CR) = [
+  { cr:"CR-2026-0501", type:"REQUEST_CARDS", mode:"PULL", product:"DEB-PLT",  // Visa Platinum
+    fromBranch:"DEL01" (fulfiller), toBranch:"PUN01" (destination), requestedQty:500,
+    status:"APPROVED", reqMaker:"A. Kulkarni", reqChecker:"Pune BM",
+    allocations:[],  shipment:null, createdAt:"27 Jun 2026" },
+  { cr:"CR-2026-0498", type:"TRANSFER_CARDS", mode:"PUSH", product:"DEB-CLS",
+    fromBranch:"VAULT", toBranch:"BLR01", requestedQty:300, status:"ALLOCATED",
+    allocations:[{lot:"LOT-V1", jobId:"3150", sr:"SR-559900012", from:"KIT-50000", to:"KIT-50299", qty:300}], … },
+]
+
+BRANCH_LOTS = [   // fulfiller's on-hand stock, FIFO by recd
+  { lot:"LOT-A", branch:"DEL01", product:"DEB-PLT", jobId:"3201", sr:"SR-560011001", from:"KIT-90001", to:"KIT-90250", available:250, recd:"02 May 2026" },
+  { lot:"LOT-B", branch:"DEL01", product:"DEB-PLT", jobId:"3266", sr:"SR-560022040", from:"KIT-91000", to:"KIT-91399", available:400, recd:"20 May 2026" },
+  { lot:"LOT-C", branch:"DEL01", product:"DEB-PLT", jobId:"3299", sr:"SR-560033075", from:"KIT-92000", to:"KIT-92099", available:100, recd:"05 Jun 2026" },
+]
+```
+
+> **Worked example.** `CR-2026-0501` — Pune Camp requests **500 Visa Platinum**; Pune BM approves. Delhi allocates **250 from Lot A** (`KIT-90001–90250`, full) + **250 from Lot B** (`KIT-91000–91249`, partial) → `RESERVED`. Delhi checker approves dispatch; goods-issue keys **AWB DEL-PUN-5521 / CTN-101 / SEAL-101** and Delhi's available Platinum drops by 500. The CR (`IN_BRANCH_TRANSFER`) **auto-appears in Pune Camp's Receipt & Ack inbound worklist** by CR number, where it's received and vaulted — closing the loop.
+
+### M.9 UX integration
+
+- **Evolve the existing "Transfers" nav item into a "Branch Transfer Order" workbench** with tabs **My requests / To fulfil / Dispatched** and a **+ New request** (Request Cards | Transfer Cards) action. Actions per row: **Allocate** (lot picking) → **Approve & Dispatch** (dual custody + shipment details).
+- **On dispatch, the CR creates a `TRANSFER`-source Expected Receipt** at the destination → it flows straight into the **already-built Receipt & Acknowledgement** worklist (searchable by CR). One CR, two halves, one source of truth.
+- Reuse primitives, `addException`/`toast`, the In-transit screen for tracking, and the same maker-checker/SoD patterns.
+
+### M.10 Alignment & build phasing (after review)
+
+- **Maps to** `cardInventoryRequirement.md` §8.5 (branch transfers) and §11 Flow K; the CR ties to **Part E** (receipt) and reuses the **Receipt & Ack** screen for the inbound leg.
+- **Build phases:** (1) `TRANSFER_ORDERS` + `BRANCH_LOTS` data + helpers in `src/lib/transfers.js`; (2) `BranchTransferOrder.jsx` worklist + Request-Cards form; (3) allocation/picking modal (FIFO, multi-lot, reserve); (4) dispatch modal (dual-custody approve + shipment details → goods-issue) that **emits a TRANSFER Expected Receipt**; (5) wire to Receipt & Ack; (6) update `cardInventoryRequirement.md` (Flow K enhancement, §8.5, new states).
+
+---
+
+## 15. Improvements, suggestions & my comments
 
 **On the core design**
 1. **Generate Expected Receipts at batch time** — this is the single most important recommendation. It decouples receipt from vendor capability and makes **Job Exec ID + Branch** a reliable key. Build the demo around this.
@@ -580,10 +980,25 @@ Aligns with `cardInventoryRequirement.md` §6 (`RECEIVED_PENDING_ACK` → `AT_BR
 12. **PIN mailer** stays a separate consignment with its own reconciliation and `MISSING_PIN_MAILER` reason (personalised programs).
 13. **Modularisation:** the main file is ~2,100 lines. I suggest extracting this feature into `src/components/ReceiptAck.jsx` + pure helpers in `src/lib/receipts.js`. It keeps the demo maintainable and mirrors what we did for `forecast.js`/`demandSeries.js`. *(Your call — I can also keep it inline to match the current single-file style.)*
 
+**On personalised (Part L) — my comments**
+14. **One component, one `cardClass` switch** — don't fork a second screen; branch only the Stage-2 rendering. Keeps the acknowledge menu unified, as you asked.
+15. **Reissue is the heart of personalised.** A missing/damaged named card is *not* "short by N" — it's "customer X has no card." Auto-raise a **reissue SR** and surface it prominently; this is the single biggest behavioural difference from pregen.
+16. **Accept-into-collection, not vault.** Wire Stage-2 accept to the **existing Collection register** so the last mile (reminders, KYC handover, unclaimed → destroy) is reused, not rebuilt.
+17. **PIN gates *handover*, not *vaulting*.** Let cards reach `AWAITING_COLLECTION` even when PIN mailers are short; block only the customer handover. This avoids stranding good cards over a PIN-stream hiccup.
+18. **Card-by-card is slow at 500/day** — default Stage-2 to **"mark all present, then flag exceptions,"** and reuse the same future **scan hook** as pregen so the custodian only touches the exceptions.
+
+**On branch transfer (Part M) — my comments**
+19. **Reserve-on-allocation is the single most important fix** to the current flow — without it the same serials can be allocated twice or issued at source while a transfer is pending.
+20. **Maker-checker at *both* ends + dual custody on the vault-out.** The fulfiller's dispatch is as sensitive as the requester's approval; don't leave it single-person.
+21. **One CR = two halves.** The transfer-order (out) and the GRN (in) are the same CR — model it once and let dispatch *emit* the destination's Expected Receipt, rather than building a parallel inbound path.
+22. **Internal shipment update is always available** — the dispatching branch keys AWB/seal/ranges itself, so transfer receipts are richer than vendor receipts and need no ASN fallback.
+23. **FIFO by default, override logged.** Suggest the oldest lots first (rotation/expiry), but allow a reasoned override — and keep per-lot provenance on every allocated range so trace/aging survive the hop.
+24. **Partial fulfilment + backorder** beats all-or-nothing — let a fulfiller send what they have and keep the shortfall open, so a stock-out branch isn't blocked on a single full fill.
+
 **Decisions (confirmed 27 Jun 2026)**
 - **A. ✅ Yes** — surface explicit `Partially Accepted` and `Quarantined` sub-states in the UI (needed for real edge cases).
 - **B. Keyboard search now; scan-to-receive (QR/barcode) later.** Build the tiered keyboard search (Job + Branch / ASN / CR); leave a clean hook for a future scan facility.
-- **C. Pregen now; personalised later.** This build covers pregen vendor + transfer receipts. Personalised card-by-card receipt is a later phase (the discrepancy register is designed to absorb it then).
+- **C. Pregen built; personalised now designed (Part L).** Pregen vendor + transfer is built and shipped. Personalised card-by-card acknowledgement is fully designed in **Part L** (same menu, card-by-card verify, separate PIN-mailer reconciliation, accept → collection register, reissue on missing/damaged) — ready to build on your sign-off.
 - **D. Modularise.** New code in `src/components/ReceiptAck.jsx` + `src/components/Discrepancies.jsx`, pure logic/data in `src/lib/receipts.js`; shared UI primitives extracted to `src/components/ui.jsx`.
 - **E. Separate top-level nav item** for the Discrepancy register (not a tab), with links to/from Exceptions.
 
@@ -591,7 +1006,7 @@ Aligns with `cardInventoryRequirement.md` §6 (`RECEIVED_PENDING_ACK` → `AT_BR
 
 ---
 
-## 14. Glossary (key terms)
+## 16. Glossary (key terms)
 
 Formal one-liners for the terms used throughout this plan:
 
@@ -605,7 +1020,22 @@ Formal one-liners for the terms used throughout this plan:
 - **SR — Service Request** — One approved card-order request; the grain at which quantity, product and serial range are tracked.
 - **Job Execution ID** — The EOD-batch run identifier stamped into every embossing-file header; the **common thread** used as the primary receipt search key.
 - **CR — Change Request** — The unique identifier for an inter-branch transfer; the receipt search key for the transfer medium.
+- **Card class** — Whether a receipt is `PREGEN` (fungible, count-verified, → vault) or `PERSONALISED` (named, card-by-card-verified, → collection). One discriminator drives the differences in Part L.
+- **Card-by-card verification** — Personalised Stage-2: every **named** card (Card ID / masked PAN / customer) is individually ticked against the manifest — not a range + count.
+- **PIN mailer** — The printed PIN carrier for a personalised card, dispatched as a **separate consignment** in **separate custody** (card and PIN never travel/handed over together).
+- **Green PIN** — Customer sets/resets the PIN via ATM / IVR / app, so **no physical PIN mailer** is produced; the mailer reconciliation step is skipped.
+- **AWAITING_COLLECTION** — The state an accepted personalised card enters (a *named register*, the Collection screen / Flow F) — it is **not** issuable vault stock.
+- **Reissue SR** — A fresh Service Request automatically raised when a named card is missing / damaged / wrong, because a personalised card **cannot be substituted** from a pool.
+- **Branch Transfer Order** — The document/menu for moving cards between locations; it carries the **CR** through request → allocate → dispatch → receipt.
+- **Request Cards** *(pull)* — A branch-initiated request for stock; a fulfiller allocates and ships against it.
+- **Transfer Cards** *(push)* — An HQ/source-initiated transfer that sends stock directly to a destination (no requisition leg).
+- **Allocation** — The fulfiller's pick of specific serial ranges (across one or more **lots**) to satisfy a transfer, FIFO-suggested.
+- **Reservation** — Stock allocated to a CR but not yet dispatched; ring-fenced so it can't be issued or re-allocated elsewhere.
+- **Goods-issue** — The dispatch posting that moves reserved stock to `IN_TRANSIT` and **decrements the source's available balance**.
+- **Lot** — A holding of stock identified by **Job ID + SR + serial range + on-hand qty** at a branch; the unit allocation picks from.
+- **IBT (3-leg transfer)** — Requisition → IBT-Out (dispatch) → IBT-In (receipt) — the standard inter-branch transfer shape.
+- **Backorder** — The unfulfilled shortfall when available stock is less than requested; kept open for a later fill.
 
 ---
 
-*End of plan — Receipt & Acknowledgement, v0.2 (approved, in build). Scope: pregen vendor + transfer; personalised deferred.*
+*End of plan — Receipt & Acknowledgement + Branch Transfer Order, v0.4 (for review). Scope: pregen + personalised acknowledgement (built); Branch Transfer Order design (Part M).*
